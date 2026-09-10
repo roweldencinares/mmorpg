@@ -14,7 +14,7 @@ import {
   QUEST_KILL_TARGET, QUEST_REWARD_ITEM, QUEST_REWARD_QTY,
   LEVEL_UP_MAX_HP_BONUS, xpToNextLevel,
   PLAYER_MAX_MANA, LEVEL_UP_MAX_MANA_BONUS, MANA_REGEN_PER_SEC,
-  MOB_NOTICE_RANGE, MOB_WANDER_SPEED, MOB_CHASE_SPEED, MOB_WANDER_RADIUS,
+  MOB_NOTICE_RANGE, MOB_LEASH_RANGE, MOB_WANDER_SPEED, MOB_CHASE_SPEED, MOB_WANDER_RADIUS,
   MOB_WANDER_PAUSE_MIN_MS, MOB_WANDER_PAUSE_MAX_MS, MOB_WANDER_ARRIVE_DIST,
   ZONE_START, ZONE_FOREST, ZONE_TRANSITION_INSET,
 } from "../shared/constants.js";
@@ -217,6 +217,14 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     if (!player || player.hp <= 0 || !mob || !mob.alive) { return; }
     if (player.zone !== mob.zone) { return; } // never allow cross-zone combat
 
+    // Being targeted provokes aggro immediately, even from outside melee
+    // range (the client sends this the instant a target is picked — see
+    // setAttackTarget() client-side). Without this, a distant mob keeps
+    // wandering obliviously while the player walks over, and chasing its
+    // randomly-relocating wander point looks like erratic circling instead
+    // of a clean approach.
+    this.mobAggroTarget.set(mobId, client.sessionId);
+
     const now = this.clock.currentTime;
     const last = this.lastAttackAt.get(client.sessionId) ?? 0;
     if (now - last < MOB_ATTACK_COOLDOWN_MS) { return; }
@@ -401,10 +409,13 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
 
       let aggroId = this.mobAggroTarget.get(mobId);
 
-      // Drop aggro if the target left, died, changed zone, or wandered back out of notice range.
+      // Drop aggro if the target left, died, changed zone, or got too far —
+      // MOB_LEASH_RANGE here, not MOB_NOTICE_RANGE, so aggro provoked from a
+      // distance (see handleAttack) survives long enough for the chase to
+      // actually close the gap instead of instantly un-aggroing.
       if (aggroId) {
         const target = this.state.players.get(aggroId);
-        if (!target || target.hp <= 0 || target.zone !== mob.zone || Math.hypot(target.x - mob.x, target.y - mob.y) > MOB_NOTICE_RANGE) {
+        if (!target || target.hp <= 0 || target.zone !== mob.zone || Math.hypot(target.x - mob.x, target.y - mob.y) > MOB_LEASH_RANGE) {
           this.mobAggroTarget.delete(mobId);
           aggroId = undefined;
         }

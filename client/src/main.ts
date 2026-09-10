@@ -795,6 +795,11 @@ class WorldScene extends Phaser.Scene {
     this.clearClickTarget();
     this.attackTargetId = mobId;
     this.mobSprites.get(mobId)?.setTint(TARGETED_MOB_COLOR);
+    // Provoke immediately, even from outside melee range — the server uses
+    // this to make the mob react (stop wandering) right away instead of only
+    // once we're already close enough to actually land a hit. Out-of-range
+    // attempts are otherwise a no-op server-side (see handleAttack).
+    this.room?.send("attack", { mobId });
   }
 
   private clearAttackTarget() {

@@ -54,6 +54,33 @@ describe("testing your Colyseus app", () => {
     assert.strictEqual(player.x, startX + PLAYER_SPEED * (1 / TICK_RATE));
   });
 
+  it("attacking from outside range still provokes aggro, so the mob chases instead of wandering obliviously", async () => {
+    const room = await colyseus.createRoom<MyRoomState>("my_room", {});
+    const client1 = await colyseus.connectTo(room);
+
+    const player = room.state.players.get(client1.sessionId);
+    // mob-1 is a rat spawned at (600,150) in the "start" zone — far enough
+    // from the player's near-center spawn ring to be well outside melee range.
+    const mob = room.state.mobs.get("mob-1");
+    const startDist = Math.hypot(mob.x - player.x, mob.y - player.y);
+    assert.ok(startDist > 100, `test assumption: mob starts far away (was ${startDist})`);
+
+    client1.send("attack", { mobId: "mob-1" });
+    await room.waitForNextMessage();
+
+    // Give the room's real fixed-timestep loop time to run stepMobAI
+    // repeatedly. An aggro'd mob closes distance continuously at
+    // MOB_CHASE_SPEED with no pauses; undirected wandering (bounded to a
+    // small radius around the mob's own spawn) could not reliably do this.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    const endDist = Math.hypot(mob.x - player.x, mob.y - player.y);
+    assert.ok(
+      endDist < startDist - 50,
+      `expected the mob to have chased the player closer (from ${startDist} to at least 50 less), was ${endDist}`,
+    );
+  });
+
   it("equips a weapon from the bag, consuming it and boosting attack damage", async () => {
     const room = await colyseus.createRoom<MyRoomState>("my_room", {});
     const client1 = await colyseus.connectTo(room);

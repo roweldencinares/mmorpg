@@ -27,6 +27,15 @@ export const MOB_RESPAWN_MS = 5000;
  *  than attack range so it visibly closes the gap before swinging. */
 export const MOB_NOTICE_RANGE = MOB_ATTACK_RANGE * 2.5;
 
+/**
+ * How far a mob will keep chasing once aggro'd before giving up — separate
+ * from MOB_NOTICE_RANGE (which only governs spontaneously noticing a nearby
+ * player while wandering) so that aggro provoked from a distance (clicking a
+ * mob to attack it before it's close enough to notice you — see handleAttack)
+ * isn't immediately dropped again just for still being outside notice range.
+ */
+export const MOB_LEASH_RANGE = 350;
+
 /** Units per second while idly wandering — slower than a chasing mob. */
 export const MOB_WANDER_SPEED = 50;
 
