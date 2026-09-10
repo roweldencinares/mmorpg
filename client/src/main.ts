@@ -88,9 +88,23 @@ class WorldScene extends Phaser.Scene {
   private hpBarFill!: Phaser.GameObjects.Rectangle;
   private levelText!: Phaser.GameObjects.Text;
   private xpBarFill!: Phaser.GameObjects.Rectangle;
-  private inventorySlots = new Map<string, { icon: Phaser.GameObjects.Rectangle; qtyText: Phaser.GameObjects.Text }>();
+  private inventorySlots = new Map<string, { icon: Phaser.GameObjects.Rectangle; nameText: Phaser.GameObjects.Text; qtyText: Phaser.GameObjects.Text }>();
   private playerHpBars = new Map<string, { bg: Phaser.GameObjects.Rectangle; fill: Phaser.GameObjects.Rectangle }>();
   private players = new Map<string, PlayerView>();
+
+  private backgroundGraphics!: Phaser.GameObjects.Graphics;
+
+  private bagOpen = false;
+  private bagPanel!: Phaser.GameObjects.Graphics;
+  private bagPanelBounds!: { x: number; y: number; w: number; h: number };
+  private bagToggleBounds!: { x: number; y: number; w: number; h: number };
+  private refreshBagDisplay: (() => void) | null = null;
+
+  private settingsOpen = false;
+  private settingsPanel!: Phaser.GameObjects.Graphics;
+  private settingsText!: Phaser.GameObjects.Text;
+  private settingsPanelBounds!: { x: number; y: number; w: number; h: number };
+  private settingsToggleBounds!: { x: number; y: number; w: number; h: number };
 
   // The zone we render — only mobs/players sharing it are shown. Same
   // coordinate space is reused across zones, so visibility (not position)
@@ -120,8 +134,13 @@ class WorldScene extends Phaser.Scene {
 
   create() {
     this.cameras.main.setBackgroundColor("#101018");
+
+    this.backgroundGraphics = this.add.graphics().setDepth(0);
+    this.drawBackground();
+
     this.add.rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH, ARENA_HEIGHT)
-      .setStrokeStyle(2, 0x3a3a55);
+      .setStrokeStyle(2, 0x3a3a55)
+      .setDepth(0);
 
     // --- Portrait panel: connection status + HP bar ---
     const portraitPanel = this.add.graphics().setDepth(1);
@@ -176,41 +195,81 @@ class WorldScene extends Phaser.Scene {
       align: "right",
     }).setOrigin(1, 0.5).setDepth(2);
 
-    const tooltip = this.add.text(0, 0, "", {
-      fontFamily: "monospace",
-      fontSize: "11px",
-      color: "#ffffff",
-      backgroundColor: "#000000cc",
-      padding: { x: 4, y: 2 },
-    }).setVisible(false).setDepth(10);
+    // --- Bag: a toggleable panel instead of an always-open icon row ---
+    this.bagToggleBounds = { x: 8, y: 78, w: 74, h: 24 };
+    const bagToggle = this.add.rectangle(
+      this.bagToggleBounds.x, this.bagToggleBounds.y, this.bagToggleBounds.w, this.bagToggleBounds.h, 0x0a0a12, 0.85,
+    ).setOrigin(0, 0).setStrokeStyle(1, 0x4b5563).setDepth(1).setInteractive({ useHandCursor: true });
+    this.add.text(
+      this.bagToggleBounds.x + this.bagToggleBounds.w / 2, this.bagToggleBounds.y + this.bagToggleBounds.h / 2, "Bag [I]",
+      { fontFamily: "monospace", fontSize: "11px", color: "#e5e7eb" },
+    ).setOrigin(0.5).setDepth(2);
 
-    // --- Inventory panel ---
-    const invPanelWidth = ITEM_ORDER.length * 46 + 4;
-    const invPanel = this.add.graphics().setDepth(1);
-    invPanel.fillStyle(0x0a0a12, 0.75);
-    invPanel.fillRoundedRect(8, 78, invPanelWidth, 44, 6);
-    invPanel.lineStyle(1, 0x4b5563, 1);
-    invPanel.strokeRoundedRect(8, 78, invPanelWidth, 44, 6);
+    const bagRowHeight = 28;
+    this.bagPanelBounds = {
+      x: 8, y: this.bagToggleBounds.y + this.bagToggleBounds.h + 4,
+      w: 200, h: ITEM_ORDER.length * bagRowHeight + 10,
+    };
+    this.bagPanel = this.add.graphics().setDepth(1).setVisible(false);
+    this.bagPanel.fillStyle(0x0a0a12, 0.9);
+    this.bagPanel.fillRoundedRect(this.bagPanelBounds.x, this.bagPanelBounds.y, this.bagPanelBounds.w, this.bagPanelBounds.h, 6);
+    this.bagPanel.lineStyle(1, 0x4b5563, 1);
+    this.bagPanel.strokeRoundedRect(this.bagPanelBounds.x, this.bagPanelBounds.y, this.bagPanelBounds.w, this.bagPanelBounds.h, 6);
 
     ITEM_ORDER.forEach((itemId, i) => {
-      const x = 12 + i * 46;
-      const y = 82;
-      const icon = this.add.rectangle(x, y, 36, 36, ITEM_COLORS[itemId])
-        .setOrigin(0, 0)
-        .setStrokeStyle(1, 0x000000)
-        .setVisible(false)
-        .setDepth(2)
-        .setInteractive({ useHandCursor: true })
-        .on("pointerover", () => tooltip.setText(ITEM_NAMES[itemId] ?? itemId).setPosition(x, y + 40).setVisible(true))
-        .on("pointerout", () => tooltip.setVisible(false));
-      const qtyText = this.add.text(x + 3, y + 20, "", {
-        fontFamily: "monospace",
-        fontSize: "11px",
-        color: "#000000",
-        fontStyle: "bold",
-      }).setVisible(false).setDepth(3);
-      this.inventorySlots.set(itemId, { icon, qtyText });
+      const rowY = this.bagPanelBounds.y + 5 + i * bagRowHeight;
+      const icon = this.add.rectangle(this.bagPanelBounds.x + 8, rowY, 22, 22, ITEM_COLORS[itemId])
+        .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false);
+      const nameText = this.add.text(this.bagPanelBounds.x + 38, rowY + 11, ITEM_NAMES[itemId] ?? itemId, {
+        fontFamily: "monospace", fontSize: "11px", color: "#e5e7eb",
+      }).setOrigin(0, 0.5).setDepth(2).setVisible(false);
+      const qtyText = this.add.text(this.bagPanelBounds.x + this.bagPanelBounds.w - 10, rowY + 11, "", {
+        fontFamily: "monospace", fontSize: "11px", color: "#facc15", fontStyle: "bold",
+      }).setOrigin(1, 0.5).setDepth(2).setVisible(false);
+      this.inventorySlots.set(itemId, { icon, nameText, qtyText });
     });
+
+    const toggleBag = () => {
+      this.bagOpen = !this.bagOpen;
+      this.bagPanel.setVisible(this.bagOpen);
+      this.refreshBagDisplay?.();
+    };
+    bagToggle.on("pointerdown", toggleBag);
+    this.input.keyboard!.on("keydown-I", toggleBag);
+
+    // --- Settings: toggleable controls reference ---
+    this.settingsToggleBounds = { x: ARENA_WIDTH - 90, y: 44, w: 82, h: 22 };
+    const settingsToggle = this.add.rectangle(
+      this.settingsToggleBounds.x, this.settingsToggleBounds.y, this.settingsToggleBounds.w, this.settingsToggleBounds.h, 0x0a0a12, 0.85,
+    ).setOrigin(0, 0).setStrokeStyle(1, 0x4b5563).setDepth(1).setInteractive({ useHandCursor: true });
+    this.add.text(
+      this.settingsToggleBounds.x + this.settingsToggleBounds.w / 2, this.settingsToggleBounds.y + this.settingsToggleBounds.h / 2, "Settings",
+      { fontFamily: "monospace", fontSize: "11px", color: "#e5e7eb" },
+    ).setOrigin(0.5).setDepth(2);
+
+    this.settingsPanelBounds = {
+      x: ARENA_WIDTH - 8 - 220, y: this.settingsToggleBounds.y + this.settingsToggleBounds.h + 4,
+      w: 220, h: 108,
+    };
+    this.settingsPanel = this.add.graphics().setDepth(1).setVisible(false);
+    this.settingsPanel.fillStyle(0x0a0a12, 0.92);
+    this.settingsPanel.fillRoundedRect(this.settingsPanelBounds.x, this.settingsPanelBounds.y, this.settingsPanelBounds.w, this.settingsPanelBounds.h, 6);
+    this.settingsPanel.lineStyle(1, 0x4b5563, 1);
+    this.settingsPanel.strokeRoundedRect(this.settingsPanelBounds.x, this.settingsPanelBounds.y, this.settingsPanelBounds.w, this.settingsPanelBounds.h, 6);
+
+    this.settingsText = this.add.text(
+      this.settingsPanelBounds.x + 10, this.settingsPanelBounds.y + 10,
+      "How to play\n\nMove: WASD / arrows,\n  or click the ground\nAttack: click a monster\nBag: I\nSettings: Esc",
+      { fontFamily: "monospace", fontSize: "11px", color: "#e5e7eb", lineSpacing: 4 },
+    ).setDepth(2).setVisible(false);
+
+    const toggleSettings = () => {
+      this.settingsOpen = !this.settingsOpen;
+      this.settingsPanel.setVisible(this.settingsOpen);
+      this.settingsText.setVisible(this.settingsOpen);
+    };
+    settingsToggle.on("pointerdown", toggleSettings);
+    this.input.keyboard!.on("keydown-ESC", toggleSettings);
 
     // --- "You Died" overlay: full-screen dim + centered text, hidden until local death ---
     this.deathOverlayBg = this.add.rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH, ARENA_HEIGHT, 0x000000, 0.6)
@@ -234,6 +293,8 @@ class WorldScene extends Phaser.Scene {
     this.wasd = this.input.keyboard!.addKeys("W,A,S,D") as typeof this.wasd;
 
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (this.isPointerOverUI(pointer.x, pointer.y)) return;
+
       const mobId = this.mobAt(pointer.worldX, pointer.worldY);
       if (mobId) {
         this.setAttackTarget(mobId);
@@ -288,6 +349,34 @@ class WorldScene extends Phaser.Scene {
   private refreshZoneVisibility() {
     for (const sync of this.mobVisibility.values()) { sync(); }
     for (const sync of this.playerVisibility.values()) { sync(); }
+  }
+
+  /** A tiled floor pattern, retinted per zone so "forest" reads visually distinct from "start". */
+  private drawBackground() {
+    this.backgroundGraphics.clear();
+    const tile = 40;
+    const inForest = this.myZone !== ZONE_START;
+    const colorA = inForest ? 0x16241a : 0x1a1a24;
+    const colorB = inForest ? 0x1c2c20 : 0x20202c;
+    for (let y = 0; y < ARENA_HEIGHT; y += tile) {
+      for (let x = 0; x < ARENA_WIDTH; x += tile) {
+        const even = ((x / tile) + (y / tile)) % 2 === 0;
+        this.backgroundGraphics.fillStyle(even ? colorA : colorB, 1);
+        this.backgroundGraphics.fillRect(x, y, tile, tile);
+      }
+    }
+  }
+
+  /** Screen-space hit test so world clicks (move/attack) don't fire through open HUD panels. */
+  private isPointerOverUI(x: number, y: number): boolean {
+    const inBounds = (b: { x: number; y: number; w: number; h: number }) =>
+      x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+
+    if (inBounds(this.bagToggleBounds)) return true;
+    if (this.bagOpen && inBounds(this.bagPanelBounds)) return true;
+    if (inBounds(this.settingsToggleBounds)) return true;
+    if (this.settingsOpen && inBounds(this.settingsPanelBounds)) return true;
+    return false;
   }
 
   private updateHpBar(hp: number, maxHp: number) {
@@ -474,6 +563,7 @@ class WorldScene extends Phaser.Scene {
           if (isMe && player.zone !== this.myZone) {
             this.myZone = player.zone;
             this.refreshZoneVisibility();
+            this.drawBackground();
           }
 
           const dmg = prevHp - player.hp;
@@ -521,8 +611,10 @@ class WorldScene extends Phaser.Scene {
             ITEM_ORDER.forEach((itemId) => {
               const qty = player.inventory.get(itemId) ?? 0;
               const slot = this.inventorySlots.get(itemId)!;
-              slot.icon.setVisible(qty > 0);
-              slot.qtyText.setVisible(qty > 0);
+              const show = this.bagOpen && qty > 0;
+              slot.icon.setVisible(show);
+              slot.nameText.setVisible(show);
+              slot.qtyText.setVisible(show);
               slot.qtyText.setText(qty > 0 ? `x${qty}` : "");
 
               if (invInitialized) {
@@ -534,6 +626,7 @@ class WorldScene extends Phaser.Scene {
               lastInv.set(itemId, qty);
             });
           };
+          this.refreshBagDisplay = refreshInventory;
           $(player.inventory).onAdd(refreshInventory);
           $(player.inventory).onChange(refreshInventory);
           refreshInventory();
