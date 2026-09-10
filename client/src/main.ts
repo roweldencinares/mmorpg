@@ -540,7 +540,7 @@ class WorldScene extends Phaser.Scene {
           invInitialized = true;
 
           let bestiaryReady = false;
-          const announceDiscovery = (mobType: string) => {
+          const announceDiscovery = (_discovered: boolean, mobType: string) => {
             if (!bestiaryReady) { return; }
             const name = MOB_TYPE_INFO[mobType]?.name ?? mobType;
             this.queueToast(`New monster discovered: ${name}!`, "#facc15");
