@@ -87,6 +87,14 @@ async function main() {
   camera.lowerRadiusLimit = 6;
   camera.upperRadiusLimit = 60;
   camera.wheelPrecision = 30;
+  // Left-click is reserved for click-to-move (see the POINTERTAP handler
+  // below) — without this, attachControl's default drag-to-rotate/pan also
+  // reacted to every click, and combined with the camera following the
+  // player every frame, that fought with itself and looked like shaking.
+  // Wheel-zoom (a separate input class) is untouched.
+  if (camera.inputs.attached.pointers) {
+    (camera.inputs.attached.pointers as any).buttons = [];
+  }
 
   new HemisphericLight("sky", new Vector3(0, 1, 0), scene).intensity = 0.6;
   const sun = new DirectionalLight("sun", new Vector3(-0.5, -1, -0.3), scene);
@@ -104,8 +112,14 @@ async function main() {
   ground.material = groundMat;
   ground.receiveShadows = true;
 
-  const players = new Map<string, { node: TransformNode; hp: number; maxHp: number }>();
-  const mobs = new Map<string, { node: TransformNode; alive: boolean }>();
+  // `target` is the latest position reported by the server; `node.position`
+  // is eased toward it every frame in the render loop below instead of
+  // snapping straight there. Without this, every network update (arriving on
+  // its own irregular cadence) moved the mesh in a discrete jump — and since
+  // the camera is locked onto the player's node, every jump became a camera
+  // jump, which read as shaking once the earlier camera-control bug was fixed.
+  const players = new Map<string, { node: TransformNode; target: Vector3; hp: number; maxHp: number }>();
+  const mobs = new Map<string, { node: TransformNode; target: Vector3; alive: boolean }>();
 
   const client = new Client(SERVER_URL);
   const room = await client.joinOrCreate<any>("my_room");
@@ -114,17 +128,23 @@ async function main() {
 
   let mySessionId = room.sessionId;
   let clickTarget: { x: number; y: number } | null = null;
+  // A second, slower-following point the camera tracks instead of the
+  // player node directly — a low-pass filter on top of the position
+  // smoothing below, since the camera being locked on tight enough to show
+  // every last bit of residual jitter (from network reconciliation, not a
+  // real gameplay motion) is far more visible/annoying than a slight lag.
+  const cameraFollow = camera.target.clone();
 
   $(room.state).mobs.onAdd((mob: any, mobId: string) => {
     const node = buildCharacterMesh(scene, mob.type, MOB_COLORS[mob.type] ?? new Color3(1, 0.3, 0.3));
     const pos = toWorld(mob.x, mob.y);
     node.position.copyFrom(pos);
     node.getChildMeshes().forEach((m) => shadows.addShadowCaster(m));
-    mobs.set(mobId, { node, alive: mob.alive });
+    mobs.set(mobId, { node, target: pos.clone(), alive: mob.alive });
 
     $(mob).onChange(() => {
       const entry = mobs.get(mobId)!;
-      entry.node.position.copyFrom(toWorld(mob.x, mob.y));
+      entry.target.copyFrom(toWorld(mob.x, mob.y));
       entry.alive = mob.alive;
       entry.node.setEnabled(mob.alive);
     });
@@ -134,13 +154,14 @@ async function main() {
     const isMe = sessionId === mySessionId;
     const color = isMe ? new Color3(1, 1, 1) : new Color3(1, 0.7, 0.5);
     const node = buildCharacterMesh(scene, "player", color);
-    node.position.copyFrom(toWorld(player.x, player.y));
+    const pos = toWorld(player.x, player.y);
+    node.position.copyFrom(pos);
     node.getChildMeshes().forEach((m) => shadows.addShadowCaster(m));
-    players.set(sessionId, { node, hp: player.hp, maxHp: player.maxHp });
+    players.set(sessionId, { node, target: pos.clone(), hp: player.hp, maxHp: player.maxHp });
 
     $(player).onChange(() => {
       const entry = players.get(sessionId)!;
-      entry.node.position.copyFrom(toWorld(player.x, player.y));
+      entry.target.copyFrom(toWorld(player.x, player.y));
       entry.hp = player.hp; entry.maxHp = player.maxHp;
       entry.node.setEnabled(player.hp > 0);
     });
@@ -160,13 +181,29 @@ async function main() {
   });
 
   scene.onBeforeRenderObservable.add(() => {
+    // Ease every character toward its latest server-reported position rather
+    // than snapping, so movement (and anything watching a node's position,
+    // like the camera below) is smooth between network updates.
+    const dt = engine.getDeltaTime() / 1000;
+    const smoothing = 1 - Math.exp(-dt * 12);
+    for (const entry of players.values()) {
+      Vector3.LerpToRef(entry.node.position, entry.target, smoothing, entry.node.position);
+    }
+    for (const entry of mobs.values()) {
+      Vector3.LerpToRef(entry.node.position, entry.target, smoothing, entry.node.position);
+    }
+
     const me = players.get(mySessionId);
     if (!me) { return; }
 
-    // Follow the player directly (mutating .target, not calling setTarget())
-    // so the camera's radius/alpha/beta framing set at creation is preserved
-    // instead of being recomputed from the camera's old position.
-    camera.target.copyFrom(me.node.position);
+    // Follow the player through a second, slower-lagging smoothing pass
+    // (see cameraFollow's comment above), mutating .target directly rather
+    // than calling setTarget() — that method recomputes radius/alpha/beta
+    // from the camera's *current* position relative to the new target,
+    // which is not what we want every single frame.
+    const cameraSmoothing = 1 - Math.exp(-dt * 5);
+    Vector3.LerpToRef(cameraFollow, me.node.position, cameraSmoothing, cameraFollow);
+    camera.target.copyFrom(cameraFollow);
 
     let moveX: -1 | 0 | 1 = 0;
     let moveY: -1 | 0 | 1 = 0;

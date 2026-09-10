@@ -107,8 +107,11 @@ const ARRIVE_THRESHOLD = 4;
 // land a hit. Kept in sync manually; client and server are separate bundles.
 const MOB_ATTACK_RANGE = 40;
 
-// How far from a click a mob sprite still counts as "clicked on".
-const MOB_PICK_RADIUS = 24;
+// How far from a click a mob sprite still counts as "clicked on". Matches the
+// sprite's actual displayed half-width (36px wide → 18px) rather than
+// extending past its visible edges — a click just outside a mob near open
+// ground should walk there, not accidentally attack-and-chase the mob.
+const MOB_PICK_RADIUS = 18;
 
 // Client-side throttle on attack sends — the server is the real cooldown authority.
 const ATTACK_SEND_INTERVAL_MS = 350;
