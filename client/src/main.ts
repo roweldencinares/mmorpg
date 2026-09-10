@@ -45,6 +45,10 @@ function xpToNextLevel(level: number): number {
 // Width of the XP bar drawn in the portrait panel, below the HP bar.
 const XP_BAR_WIDTH = 158;
 
+// Mirrors server's ZONE_START (shared/constants.ts) — the zone every fresh
+// session starts in, and this client's default until told otherwise.
+const ZONE_START = "start";
+
 // Below this distance to the click target we consider ourselves "arrived"
 // and stop sending movement input.
 const ARRIVE_THRESHOLD = 4;
@@ -59,8 +63,8 @@ const MOB_PICK_RADIUS = 24;
 // Client-side throttle on attack sends — the server is the real cooldown authority.
 const ATTACK_SEND_INTERVAL_MS = 350;
 
-interface MobView { x: number; y: number; hp: number; maxHp: number; alive: boolean; type: string; }
-interface PlayerView { x: number; y: number; hp: number; maxHp: number; level: number; xp: number; }
+interface MobView { x: number; y: number; hp: number; maxHp: number; alive: boolean; type: string; zone: string; }
+interface PlayerView { x: number; y: number; hp: number; maxHp: number; level: number; xp: number; zone: string; }
 
 class WorldScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -87,6 +91,13 @@ class WorldScene extends Phaser.Scene {
   private inventorySlots = new Map<string, { icon: Phaser.GameObjects.Rectangle; qtyText: Phaser.GameObjects.Text }>();
   private playerHpBars = new Map<string, { bg: Phaser.GameObjects.Rectangle; fill: Phaser.GameObjects.Rectangle }>();
   private players = new Map<string, PlayerView>();
+
+  // The zone we render — only mobs/players sharing it are shown. Same
+  // coordinate space is reused across zones, so visibility (not position)
+  // is what actually separates them on screen.
+  private myZone: string = ZONE_START;
+  private mobVisibility = new Map<string, () => void>();
+  private playerVisibility = new Map<string, () => void>();
 
   private questText!: Phaser.GameObjects.Text;
   // Toasts stack vertically (up to MAX_VISIBLE_TOASTS at once) instead of a
@@ -273,6 +284,12 @@ class WorldScene extends Phaser.Scene {
     this.attackTargetId = undefined;
   }
 
+  /** Re-applies show/hide to every tracked mob and other player after our own zone changes. */
+  private refreshZoneVisibility() {
+    for (const sync of this.mobVisibility.values()) { sync(); }
+    for (const sync of this.playerVisibility.values()) { sync(); }
+  }
+
   private updateHpBar(hp: number, maxHp: number) {
     const ratio = Phaser.Math.Clamp(hp / maxHp, 0, 1);
     this.hpBarFill.width = 194 * ratio;
@@ -357,7 +374,7 @@ class WorldScene extends Phaser.Scene {
       const $ = getStateCallbacks(room);
 
       $(room.state).mobs.onAdd((mob, mobId) => {
-        this.mobs.set(mobId, { x: mob.x, y: mob.y, hp: mob.hp, maxHp: mob.maxHp, alive: mob.alive, type: mob.type });
+        this.mobs.set(mobId, { x: mob.x, y: mob.y, hp: mob.hp, maxHp: mob.maxHp, alive: mob.alive, type: mob.type, zone: mob.zone });
         const baseColor = MOB_TYPE_INFO[mob.type]?.color ?? DEFAULT_MOB_COLOR;
 
         const sprite = this.add.image(mob.x, mob.y, "hero")
@@ -377,23 +394,34 @@ class WorldScene extends Phaser.Scene {
         const hpFill = this.add.rectangle(mob.x - barWidth / 2, mob.y - 34, barWidth, 5, 0x4ade80).setOrigin(0, 0.5);
         this.mobHpBars.set(mobId, { bg: hpBg, fill: hpFill });
 
+        // Only render mobs that share our current zone — same numeric
+        // coordinate space is reused across zones, so this is the only thing
+        // that actually keeps them visually separated.
+        const syncVisibility = () => {
+          const visible = mob.alive && mob.zone === this.myZone;
+          sprite.setVisible(visible);
+          nameLabel.setVisible(visible);
+          hpBg.setVisible(visible);
+          hpFill.setVisible(visible);
+        };
+        this.mobVisibility.set(mobId, syncVisibility);
+        syncVisibility();
+
         $(mob).onChange(() => {
           const view = this.mobs.get(mobId);
           const prevHp = view?.hp ?? mob.hp;
-          if (view) { view.x = mob.x; view.y = mob.y; view.hp = mob.hp; view.maxHp = mob.maxHp; view.alive = mob.alive; view.type = mob.type; }
+          if (view) { view.x = mob.x; view.y = mob.y; view.hp = mob.hp; view.maxHp = mob.maxHp; view.alive = mob.alive; view.type = mob.type; view.zone = mob.zone; }
 
           const dmg = prevHp - mob.hp;
           if (dmg > 0) { this.spawnFloatingText(mob.x, mob.y - 20, `-${dmg}`, "#ffffff"); }
 
           const tint = this.attackTargetId === mobId ? TARGETED_MOB_COLOR : baseColor;
-          sprite.setPosition(mob.x, mob.y).setVisible(mob.alive).setTint(tint);
-          nameLabel.setPosition(mob.x, mob.y - 46).setVisible(mob.alive);
-
+          sprite.setPosition(mob.x, mob.y).setTint(tint);
+          nameLabel.setPosition(mob.x, mob.y - 46);
           hpBg.setPosition(mob.x, mob.y - 34);
-          hpBg.setVisible(mob.alive);
           hpFill.setPosition(mob.x - barWidth / 2, mob.y - 34);
-          hpFill.setVisible(mob.alive);
           hpFill.width = barWidth * Phaser.Math.Clamp(mob.hp / mob.maxHp, 0, 1);
+          syncVisibility();
 
           if (!mob.alive && this.attackTargetId === mobId) {
             this.clearAttackTarget();
@@ -403,7 +431,7 @@ class WorldScene extends Phaser.Scene {
 
       $(room.state).players.onAdd((player, sessionId) => {
         const isMe = sessionId === room.sessionId;
-        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp });
+        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp, zone: player.zone });
 
         const avatar = this.add.image(player.x, player.y, "hero")
           .setDisplaySize(40, 56)
@@ -422,13 +450,30 @@ class WorldScene extends Phaser.Scene {
         const hpFill = this.add.rectangle(player.x - barWidth / 2, player.y - 46, barWidth, 5, 0xf87171).setOrigin(0, 0.5);
         this.playerHpBars.set(sessionId, { bg: hpBg, fill: hpFill });
 
+        // We always render ourselves; other players only render while they
+        // share our current zone.
+        const syncVisibility = () => {
+          const visible = isMe || player.zone === this.myZone;
+          avatar.setVisible(visible);
+          label.setVisible(visible);
+          hpBg.setVisible(visible);
+          hpFill.setVisible(visible);
+        };
+        this.playerVisibility.set(sessionId, syncVisibility);
+        syncVisibility();
+
         $(player).onChange(() => {
           const view = this.players.get(sessionId);
           const prevHp = view?.hp ?? player.hp;
           const prevLevel = view?.level ?? player.level;
           if (view) {
             view.x = player.x; view.y = player.y; view.hp = player.hp; view.maxHp = player.maxHp;
-            view.level = player.level; view.xp = player.xp;
+            view.level = player.level; view.xp = player.xp; view.zone = player.zone;
+          }
+
+          if (isMe && player.zone !== this.myZone) {
+            this.myZone = player.zone;
+            this.refreshZoneVisibility();
           }
 
           const dmg = prevHp - player.hp;
@@ -440,6 +485,7 @@ class WorldScene extends Phaser.Scene {
           hpBg.setPosition(player.x, player.y - 46);
           hpFill.setPosition(player.x - barWidth / 2, player.y - 46);
           hpFill.width = barWidth * Phaser.Math.Clamp(player.hp / player.maxHp, 0, 1);
+          syncVisibility();
 
           if (isMe) {
             this.hpText.setText(alive ? `${player.hp}/${player.maxHp}` : "respawning...");
@@ -461,6 +507,7 @@ class WorldScene extends Phaser.Scene {
         });
 
         if (isMe) {
+          this.myZone = player.zone;
           this.hpText.setText(`${player.hp}/${player.maxHp}`);
           this.updateHpBar(player.hp, player.maxHp);
           this.updateXpBar(player.level, player.xp);
@@ -508,6 +555,7 @@ class WorldScene extends Phaser.Scene {
         this.labels.get(sessionId)?.destroy();
         this.sprites.delete(sessionId);
         this.labels.delete(sessionId);
+        this.playerVisibility.delete(sessionId);
       });
 
       room.onLeave((code) => {

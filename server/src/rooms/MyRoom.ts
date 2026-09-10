@@ -12,18 +12,28 @@ import {
   LEVEL_UP_MAX_HP_BONUS, xpToNextLevel,
   MOB_NOTICE_RANGE, MOB_WANDER_SPEED, MOB_CHASE_SPEED, MOB_WANDER_RADIUS,
   MOB_WANDER_PAUSE_MIN_MS, MOB_WANDER_PAUSE_MAX_MS, MOB_WANDER_ARRIVE_DIST,
+  ZONE_START, ZONE_FOREST, ZONE_TRANSITION_INSET,
 } from "../shared/constants.js";
 
 const clamp = (value: number, min: number, max: number) =>
   (value < min ? min : value > max ? max : value);
 
-/** Fixed spawn points — mobs wander/chase from here but always return to it. */
+/**
+ * Fixed spawn points — mobs wander/chase from here but always return to it.
+ * Two zones share the same 0-800/0-600 coordinate space; `zone` is what
+ * actually keeps them apart, both here and everywhere else mobs/players are
+ * compared.
+ */
 const MOB_SPAWNS = [
-  { x: 200, y: 150, type: "rat" },
-  { x: 600, y: 150, type: "rat" },
-  { x: 200, y: 450, type: "slime" },
-  { x: 600, y: 450, type: "slime" },
-  { x: 400, y: 300, type: "wolf" },
+  { x: 200, y: 150, type: "rat", zone: ZONE_START },
+  { x: 600, y: 150, type: "rat", zone: ZONE_START },
+  { x: 200, y: 450, type: "slime", zone: ZONE_START },
+  { x: 600, y: 450, type: "slime", zone: ZONE_START },
+  { x: 400, y: 300, type: "wolf", zone: ZONE_START },
+  // Second zone, reachable by walking off the right edge of the start arena.
+  { x: 200, y: 150, type: "wolf", zone: ZONE_FOREST },
+  { x: 600, y: 450, type: "wolf", zone: ZONE_FOREST },
+  { x: 400, y: 300, type: "slime", zone: ZONE_FOREST },
 ];
 
 export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
@@ -75,7 +85,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       const mobId = `mob-${i}`;
       const maxHp = MOB_TYPES[pos.type].maxHp;
       this.state.mobs.set(mobId, new Mob({
-        x: pos.x, y: pos.y, hp: maxHp, maxHp, alive: true, type: pos.type,
+        x: pos.x, y: pos.y, zone: pos.zone, hp: maxHp, maxHp, alive: true, type: pos.type,
       }));
       this.mobSpawns.set(mobId, { x: pos.x, y: pos.y });
     });
@@ -85,6 +95,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     const player = this.state.players.get(client.sessionId);
     const mob = this.state.mobs.get(mobId);
     if (!player || player.hp <= 0 || !mob || !mob.alive) { return; }
+    if (player.zone !== mob.zone) { return; } // never allow cross-zone combat
 
     const now = this.clock.currentTime;
     const last = this.lastAttackAt.get(client.sessionId) ?? 0;
@@ -152,6 +163,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       y: ARENA_HEIGHT / 2 + Math.sin(angle) * 80,
       vx: 0,
       vy: 0,
+      zone: ZONE_START,
       hp: PLAYER_MAX_HP,
       maxHp: PLAYER_MAX_HP,
       level: 1,
@@ -186,6 +198,8 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       for (const input of channel) {
         stepEntity(player, input, ctx.dt);
       }
+
+      this.maybeTransitionZone(player);
     }
 
     this.stepMobAI(ctx.dt);
@@ -214,21 +228,21 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
 
       let aggroId = this.mobAggroTarget.get(mobId);
 
-      // Drop aggro if the target left, died, or wandered back out of notice range.
+      // Drop aggro if the target left, died, changed zone, or wandered back out of notice range.
       if (aggroId) {
         const target = this.state.players.get(aggroId);
-        if (!target || target.hp <= 0 || Math.hypot(target.x - mob.x, target.y - mob.y) > MOB_NOTICE_RANGE) {
+        if (!target || target.hp <= 0 || target.zone !== mob.zone || Math.hypot(target.x - mob.x, target.y - mob.y) > MOB_NOTICE_RANGE) {
           this.mobAggroTarget.delete(mobId);
           aggroId = undefined;
         }
       }
 
-      // Not chasing anyone — see if a living player just wandered into notice range.
+      // Not chasing anyone — see if a living player in the same zone just wandered into notice range.
       if (!aggroId) {
         let nearestId: string | undefined;
         let nearestDist = MOB_NOTICE_RANGE;
         for (const [sessionId, player] of this.state.players) {
-          if (player.hp <= 0) { continue; }
+          if (player.hp <= 0 || player.zone !== mob.zone) { continue; }
           const dist = Math.hypot(player.x - mob.x, player.y - mob.y);
           if (dist <= nearestDist) {
             nearestDist = dist;
@@ -293,6 +307,21 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
   }
 
   /**
+   * Zones are logically separate but numerically share the 0-800/0-600
+   * space, so a transition is just: pin against the far wall of your
+   * current zone, pop out just inside the near wall of the other one.
+   */
+  private maybeTransitionZone(player: Player) {
+    if (player.zone === ZONE_START && player.x >= ARENA_WIDTH - PLAYER_HALF) {
+      player.zone = ZONE_FOREST;
+      player.x = PLAYER_HALF + ZONE_TRANSITION_INSET;
+    } else if (player.zone === ZONE_FOREST && player.x <= PLAYER_HALF) {
+      player.zone = ZONE_START;
+      player.x = ARENA_WIDTH - PLAYER_HALF - ZONE_TRANSITION_INSET;
+    }
+  }
+
+  /**
    * Mobs hit back: any living mob whose cooldown is up deals damage to the
    * first living player found in range. One target per mob per cooldown —
    * no cleave. (Aggro/chase toward that range is handled by stepMobAI()
@@ -309,6 +338,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
 
       for (const [sessionId, player] of this.state.players) {
         if (player.hp <= 0) { continue; }
+        if (player.zone !== mob.zone) { continue; } // never allow cross-zone combat
         if (Math.hypot(player.x - mob.x, player.y - mob.y) > MOB_ATTACK_RANGE) { continue; }
 
         this.lastMobAttackAt.set(mobId, now);

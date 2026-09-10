@@ -21,6 +21,8 @@ export const Player = schema({
   y: t.number(),
   vx: t.number(),
   vy: t.number(),
+  /** Which logically-separate map this player is in — see shared/constants.ts. */
+  zone: t.string(),
   hp: t.number(),
   maxHp: t.number(),
   level: t.number(),
@@ -37,6 +39,8 @@ export type Player = SchemaType<typeof Player>;
 export const Mob = schema({
   x: t.number(),
   y: t.number(),
+  /** Which logically-separate map this mob belongs to — see shared/constants.ts. */
+  zone: t.string(),
   hp: t.number(),
   maxHp: t.number(),
   alive: t.boolean(),
