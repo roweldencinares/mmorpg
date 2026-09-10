@@ -82,6 +82,10 @@ class WorldScene extends Phaser.Scene {
   private toastQueue: { text: string; color: string }[] = [];
   private toastBusy = false;
 
+  private deathOverlayBg!: Phaser.GameObjects.Rectangle;
+  private deathOverlayTitle!: Phaser.GameObjects.Text;
+  private deathOverlaySubtitle!: Phaser.GameObjects.Text;
+
   preload() {
     this.load.image("hero", heroUrl);
   }
@@ -173,6 +177,24 @@ class WorldScene extends Phaser.Scene {
       }).setVisible(false).setDepth(3);
       this.inventorySlots.set(itemId, { icon, qtyText });
     });
+
+    // --- "You Died" overlay: full-screen dim + centered text, hidden until local death ---
+    this.deathOverlayBg = this.add.rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH, ARENA_HEIGHT, 0x000000, 0.6)
+      .setVisible(false)
+      .setDepth(20);
+
+    this.deathOverlayTitle = this.add.text(ARENA_WIDTH / 2, ARENA_HEIGHT / 2 - 24, "YOU DIED", {
+      fontFamily: "monospace",
+      fontSize: "48px",
+      color: "#f87171",
+      fontStyle: "bold",
+    }).setOrigin(0.5).setStroke("#000000", 6).setVisible(false).setDepth(21);
+
+    this.deathOverlaySubtitle = this.add.text(ARENA_WIDTH / 2, ARENA_HEIGHT / 2 + 36, "Respawning...", {
+      fontFamily: "monospace",
+      fontSize: "16px",
+      color: "#e5e7eb",
+    }).setOrigin(0.5).setStroke("#000000", 3).setVisible(false).setDepth(21);
 
     this.cursors = this.input.keyboard!.createCursorKeys();
     this.wasd = this.input.keyboard!.addKeys("W,A,S,D") as typeof this.wasd;
@@ -373,6 +395,11 @@ class WorldScene extends Phaser.Scene {
             this.hpText.setText(alive ? `${player.hp}/${player.maxHp}` : "respawning...");
             this.updateHpBar(player.hp, player.maxHp);
             if (!alive) { this.clearAttackTarget(); this.clearClickTarget(); }
+
+            const showDeathOverlay = !alive;
+            this.deathOverlayBg.setVisible(showDeathOverlay);
+            this.deathOverlayTitle.setVisible(showDeathOverlay);
+            this.deathOverlaySubtitle.setVisible(showDeathOverlay);
 
             const questLine = player.questComplete
               ? "Cull the Vermin — complete!"
