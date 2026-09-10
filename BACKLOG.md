@@ -12,6 +12,7 @@ Small, independently-shippable next steps for the MMORPG prototype (Colyseus ser
 - [x] Shop (buy items) — a toggleable Shop panel (key O) selling a small catalog (Health Potion, Iron Ore) for Gold Coin, server-validated (`buy` message in MyRoom.ts, catalog in shared/economy.ts).
 - [x] Crafting — a toggleable Craft panel (key C) with one starter recipe (Iron Dagger = 2 Iron Ore + 1 Wolf Pelt), server-validated (`craft` message, recipes in shared/economy.ts).
 - [x] Health Potion — a consumable bought from the shop; "Use" button in the Bag heals a fixed amount, capped at max HP, server-validated (`use` message, consumables in shared/economy.ts).
+- [x] Gear/Power growth — equippable weapon (Iron Dagger, craftable) and armor (Leather Armor, buyable) slots. Equipping consumes the item from the bag and boosts stats (weapon: attack damage, armor: max HP); unequipping returns it. A "Power" readout in the HUD shows the total from currently-equipped gear. Server-validated (`equip`/`unequip` messages, catalog in shared/gear.ts).
 
 ## Notes for an autonomous run
 

@@ -9,6 +9,7 @@ export const SHOP_CURRENCY_ITEM = "gold_coin";
 export const SHOP_CATALOG: ShopEntry[] = [
   { itemId: "health_potion", price: 10 },
   { itemId: "iron_ore", price: 5 },
+  { itemId: "leather_armor", price: 20 },
 ];
 
 export interface Recipe {

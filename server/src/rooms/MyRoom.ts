@@ -3,6 +3,7 @@ import { z } from "zod";
 import { MyRoomState, Player, Mob, MoveInput } from "./schema/MyRoomState.js";
 import { rollDrop } from "../shared/items.js";
 import { SHOP_CATALOG, SHOP_CURRENCY_ITEM, RECIPES, CONSUMABLES } from "../shared/economy.js";
+import { GEAR_CATALOG } from "../shared/gear.js";
 import { MOB_TYPES } from "../shared/mobTypes.js";
 import { stepEntity, moveToward } from "../shared/movement.js";
 import {
@@ -86,6 +87,12 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     use: validate(z.object({ itemId: z.string() }), function (this: MyRoom, client: Client, message: { itemId: string }) {
       this.handleUse(client, message.itemId);
     }),
+    equip: validate(z.object({ itemId: z.string() }), function (this: MyRoom, client: Client, message: { itemId: string }) {
+      this.handleEquip(client, message.itemId);
+    }),
+    unequip: validate(z.object({ slot: z.enum(["weapon", "armor"]) }), function (this: MyRoom, client: Client, message: { slot: "weapon" | "armor" }) {
+      this.handleUnequip(client, message.slot);
+    }),
   };
 
   private handleBuy(client: Client, itemId: string) {
@@ -132,6 +139,57 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     player.hp = Math.min(player.maxHp, player.hp + consumable.healAmount);
   }
 
+  /** Consumes one `itemId` from the bag and equips it, returning any previously-equipped item to the bag. */
+  private handleEquip(client: Client, itemId: string) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) { return; }
+
+    const gear = GEAR_CATALOG[itemId];
+    if (!gear) { return; }
+
+    const qty = player.inventory.get(itemId) ?? 0;
+    if (qty <= 0) { return; }
+
+    const slotField = gear.slot === "weapon" ? "equippedWeapon" : "equippedArmor";
+    const currentlyEquipped = player[slotField];
+    if (currentlyEquipped === itemId) { return; } // already equipped
+
+    player.inventory.set(itemId, qty - 1);
+    if (currentlyEquipped) {
+      player.inventory.set(currentlyEquipped, (player.inventory.get(currentlyEquipped) ?? 0) + 1);
+    }
+    player[slotField] = itemId;
+
+    if (gear.slot === "armor") {
+      const oldPower = currentlyEquipped ? (GEAR_CATALOG[currentlyEquipped]?.power ?? 0) : 0;
+      this.applyArmorDelta(player, gear.power - oldPower);
+    }
+  }
+
+  private handleUnequip(client: Client, slot: "weapon" | "armor") {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) { return; }
+
+    const slotField = slot === "weapon" ? "equippedWeapon" : "equippedArmor";
+    const itemId = player[slotField];
+    if (!itemId) { return; }
+
+    player.inventory.set(itemId, (player.inventory.get(itemId) ?? 0) + 1);
+    player[slotField] = "";
+
+    if (slot === "armor") {
+      this.applyArmorDelta(player, -(GEAR_CATALOG[itemId]?.power ?? 0));
+    }
+  }
+
+  /** Shifts maxHp by `delta` (armor equip/unequip), carrying the same gain/loss into current hp. */
+  private applyArmorDelta(player: Player, delta: number) {
+    player.maxHp += delta;
+    player.hp = delta >= 0
+      ? Math.min(player.hp + delta, player.maxHp)
+      : Math.min(player.hp, player.maxHp);
+  }
+
   onCreate(options: any) {
     this.setFixedTimestep((ctx) => this.step(ctx), TICK_RATE);
 
@@ -158,7 +216,8 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     if (Math.hypot(mob.x - player.x, mob.y - player.y) > MOB_ATTACK_RANGE) { return; }
 
     this.lastAttackAt.set(client.sessionId, now);
-    mob.hp = Math.max(0, mob.hp - MOB_ATTACK_DAMAGE);
+    const weaponPower = player.equippedWeapon ? (GEAR_CATALOG[player.equippedWeapon]?.power ?? 0) : 0;
+    mob.hp = Math.max(0, mob.hp - (MOB_ATTACK_DAMAGE + weaponPower));
 
     if (mob.hp === 0) {
       mob.alive = false;
@@ -224,6 +283,8 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       xp: 0,
       questKills: 0,
       questComplete: false,
+      equippedWeapon: "",
+      equippedArmor: "",
     }));
   }
 

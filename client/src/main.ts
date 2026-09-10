@@ -12,13 +12,14 @@ type MoveInput = { moveX: -1 | 0 | 1; moveY: -1 | 0 | 1 };
 // Mirrors server's shared/items.ts ITEM_TABLE — display names/colors only,
 // the server is the source of truth for what items exist and what they mean.
 // Fixed order keeps HUD slots from jumping around as items are picked up.
-const ITEM_ORDER = ["wolf_pelt", "iron_ore", "gold_coin", "health_potion", "iron_dagger"];
+const ITEM_ORDER = ["wolf_pelt", "iron_ore", "gold_coin", "health_potion", "iron_dagger", "leather_armor"];
 const ITEM_NAMES: Record<string, string> = {
   wolf_pelt: "Wolf Pelt",
   iron_ore: "Iron Ore",
   gold_coin: "Gold Coin",
   health_potion: "Health Potion",
   iron_dagger: "Iron Dagger",
+  leather_armor: "Leather Armor",
 };
 const ITEM_COLORS: Record<string, number> = {
   wolf_pelt: 0x8b5a2b,
@@ -26,6 +27,7 @@ const ITEM_COLORS: Record<string, number> = {
   gold_coin: 0xfbbf24,
   health_potion: 0xf87171,
   iron_dagger: 0xd1d5db,
+  leather_armor: 0xa16207,
 };
 
 // Mirrors server's shared/economy.ts — display data only, the server is the
@@ -34,11 +36,19 @@ const SHOP_CURRENCY_ITEM = "gold_coin";
 const SHOP_CATALOG: { itemId: string; price: number }[] = [
   { itemId: "health_potion", price: 10 },
   { itemId: "iron_ore", price: 5 },
+  { itemId: "leather_armor", price: 20 },
 ];
 const RECIPES: { id: string; name: string; inputs: Record<string, number> }[] = [
   { id: "iron_dagger", name: "Iron Dagger", inputs: { iron_ore: 2, wolf_pelt: 1 } },
 ];
 const CONSUMABLE_ITEMS = new Set(["health_potion"]);
+
+// Mirrors server's shared/gear.ts — display data only, the server validates
+// every equip/unequip and is the source of truth for slot/power values.
+const GEAR_CATALOG: Record<string, { slot: "weapon" | "armor"; name: string; power: number }> = {
+  iron_dagger: { slot: "weapon", name: "Iron Dagger", power: 8 },
+  leather_armor: { slot: "armor", name: "Leather Armor", power: 20 },
+};
 
 // How far auto-attack will look for a new target after a kill, from the
 // player's current position, before giving up and going idle.
@@ -84,7 +94,7 @@ const MOB_PICK_RADIUS = 24;
 const ATTACK_SEND_INTERVAL_MS = 350;
 
 interface MobView { x: number; y: number; hp: number; maxHp: number; alive: boolean; type: string; zone: string; }
-interface PlayerView { x: number; y: number; hp: number; maxHp: number; level: number; xp: number; zone: string; }
+interface PlayerView { x: number; y: number; hp: number; maxHp: number; level: number; xp: number; zone: string; equippedWeapon: string; equippedArmor: string; }
 
 class WorldScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -109,12 +119,15 @@ class WorldScene extends Phaser.Scene {
   private hpBarFill!: Phaser.GameObjects.Rectangle;
   private levelText!: Phaser.GameObjects.Text;
   private xpBarFill!: Phaser.GameObjects.Rectangle;
+  private powerText!: Phaser.GameObjects.Text;
   private inventorySlots = new Map<string, {
     icon: Phaser.GameObjects.Rectangle;
     nameText: Phaser.GameObjects.Text;
     qtyText: Phaser.GameObjects.Text;
     useButton?: Phaser.GameObjects.Rectangle;
     useButtonLabel?: Phaser.GameObjects.Text;
+    equipButton?: Phaser.GameObjects.Rectangle;
+    equipButtonLabel?: Phaser.GameObjects.Text;
   }>();
   private playerHpBars = new Map<string, { bg: Phaser.GameObjects.Rectangle; fill: Phaser.GameObjects.Rectangle }>();
   private players = new Map<string, PlayerView>();
@@ -220,6 +233,15 @@ class WorldScene extends Phaser.Scene {
     this.xpBarFill = this.add.rectangle(xpBarX, xpBarY, XP_BAR_WIDTH, 8, 0x60a5fa).setOrigin(0, 0).setDepth(2);
     xpBarBg.setStrokeStyle(1, 0x000000);
 
+    // Sum of currently-equipped gear power (weapon attack bonus + armor HP
+    // bonus) — a single legible number for "how strong is my gear right now".
+    this.powerText = this.add.text(216, 14, "Power 0", {
+      fontFamily: "monospace",
+      fontSize: "10px",
+      color: "#fbbf24",
+      fontStyle: "bold",
+    }).setOrigin(1, 0).setDepth(2);
+
     // --- Quest panel ---
     const questPanel = this.add.graphics().setDepth(1);
     questPanel.fillStyle(0x0a0a12, 0.75);
@@ -284,7 +306,8 @@ class WorldScene extends Phaser.Scene {
       const nameText = this.add.text(this.bagPanelBounds.x + 38, rowY + 11, ITEM_NAMES[itemId] ?? itemId, {
         fontFamily: "monospace", fontSize: "11px", color: "#e5e7eb",
       }).setOrigin(0, 0.5).setDepth(2).setVisible(false);
-      const qtyX = this.bagPanelBounds.x + this.bagPanelBounds.w - (CONSUMABLE_ITEMS.has(itemId) ? 60 : 10);
+      const gear = GEAR_CATALOG[itemId];
+      const qtyX = this.bagPanelBounds.x + this.bagPanelBounds.w - (CONSUMABLE_ITEMS.has(itemId) || gear ? 60 : 10);
       const qtyText = this.add.text(qtyX, rowY + 11, "", {
         fontFamily: "monospace", fontSize: "11px", color: "#facc15", fontStyle: "bold",
       }).setOrigin(1, 0.5).setDepth(2).setVisible(false);
@@ -300,7 +323,27 @@ class WorldScene extends Phaser.Scene {
           fontFamily: "monospace", fontSize: "10px", color: "#ffffff", fontStyle: "bold",
         }).setOrigin(0.5).setDepth(3).setVisible(false);
       }
-      this.inventorySlots.set(itemId, { icon, nameText, qtyText, useButton, useButtonLabel });
+
+      let equipButton: Phaser.GameObjects.Rectangle | undefined;
+      let equipButtonLabel: Phaser.GameObjects.Text | undefined;
+      if (gear) {
+        equipButton = this.add.rectangle(this.bagPanelBounds.x + this.bagPanelBounds.w - 46, rowY, 38, 22, 0x2563eb)
+          .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false)
+          .setInteractive({ useHandCursor: true })
+          .on("pointerdown", () => {
+            const me = this.mySessionId && this.players.get(this.mySessionId);
+            const isEquipped = me && (gear.slot === "weapon" ? me.equippedWeapon : me.equippedArmor) === itemId;
+            if (isEquipped) {
+              this.room?.send("unequip", { slot: gear.slot });
+            } else {
+              this.room?.send("equip", { itemId });
+            }
+          });
+        equipButtonLabel = this.add.text(this.bagPanelBounds.x + this.bagPanelBounds.w - 27, rowY + 11, "Equip", {
+          fontFamily: "monospace", fontSize: "9px", color: "#ffffff", fontStyle: "bold",
+        }).setOrigin(0.5).setDepth(3).setVisible(false);
+      }
+      this.inventorySlots.set(itemId, { icon, nameText, qtyText, useButton, useButtonLabel, equipButton, equipButtonLabel });
     });
 
     // --- Shop panel ---
@@ -565,6 +608,11 @@ class WorldScene extends Phaser.Scene {
     this.xpBarFill.width = XP_BAR_WIDTH * ratio;
   }
 
+  private updatePowerText(equippedWeapon: string, equippedArmor: string) {
+    const power = (GEAR_CATALOG[equippedWeapon]?.power ?? 0) + (GEAR_CATALOG[equippedArmor]?.power ?? 0);
+    this.powerText.setText(`Power ${power}`);
+  }
+
   private spawnFloatingText(x: number, y: number, text: string, color: string) {
     // Small random horizontal jitter so back-to-back hits on the same target
     // don't spawn their numbers on top of each other and smear into mush.
@@ -692,7 +740,7 @@ class WorldScene extends Phaser.Scene {
 
       $(room.state).players.onAdd((player, sessionId) => {
         const isMe = sessionId === room.sessionId;
-        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp, zone: player.zone });
+        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp, zone: player.zone, equippedWeapon: player.equippedWeapon, equippedArmor: player.equippedArmor });
 
         const avatar = this.add.image(player.x, player.y, "hero")
           .setDisplaySize(40, 56)
@@ -730,6 +778,7 @@ class WorldScene extends Phaser.Scene {
           if (view) {
             view.x = player.x; view.y = player.y; view.hp = player.hp; view.maxHp = player.maxHp;
             view.level = player.level; view.xp = player.xp; view.zone = player.zone;
+            view.equippedWeapon = player.equippedWeapon; view.equippedArmor = player.equippedArmor;
           }
 
           if (isMe && player.zone !== this.myZone) {
@@ -753,6 +802,7 @@ class WorldScene extends Phaser.Scene {
             this.hpText.setText(alive ? `${player.hp}/${player.maxHp}` : "respawning...");
             this.updateHpBar(player.hp, player.maxHp);
             this.updateXpBar(player.level, player.xp);
+            this.updatePowerText(player.equippedWeapon, player.equippedArmor);
             if (player.level > prevLevel) { this.queueToast(`Level up! Lv ${player.level}`, "#a5b4fc"); }
             if (!alive) { this.clearAttackTarget(); this.clearClickTarget(); }
 
@@ -773,6 +823,7 @@ class WorldScene extends Phaser.Scene {
           this.hpText.setText(`${player.hp}/${player.maxHp}`);
           this.updateHpBar(player.hp, player.maxHp);
           this.updateXpBar(player.level, player.xp);
+          this.updatePowerText(player.equippedWeapon, player.equippedArmor);
           this.questText.setText(player.questComplete
             ? "Cull the Vermin — complete!"
             : `Cull the Vermin  ${player.questKills}/${QUEST_KILL_TARGET}`);
@@ -782,14 +833,18 @@ class WorldScene extends Phaser.Scene {
           const refreshInventory = () => {
             ITEM_ORDER.forEach((itemId) => {
               const qty = player.inventory.get(itemId) ?? 0;
+              const gear = GEAR_CATALOG[itemId];
+              const isEquipped = !!gear && (gear.slot === "weapon" ? player.equippedWeapon : player.equippedArmor) === itemId;
               const slot = this.inventorySlots.get(itemId)!;
-              const show = this.activePanel === "bag" && qty > 0;
+              const show = this.activePanel === "bag" && (qty > 0 || isEquipped);
               slot.icon.setVisible(show);
               slot.nameText.setVisible(show);
               slot.qtyText.setVisible(show);
               slot.qtyText.setText(qty > 0 ? `x${qty}` : "");
               slot.useButton?.setVisible(show);
               slot.useButtonLabel?.setVisible(show);
+              slot.equipButton?.setVisible(show).setFillStyle(isEquipped ? 0x6b7280 : 0x2563eb);
+              slot.equipButtonLabel?.setVisible(show).setText(isEquipped ? "Unequip" : "Equip").setFontSize(isEquipped ? 8 : 9);
 
               if (invInitialized) {
                 const prev = lastInv.get(itemId) ?? 0;

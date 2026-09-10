@@ -33,6 +33,9 @@ export const Player = schema({
   bestiary: t.map("boolean"),
   questKills: t.number(),
   questComplete: t.boolean(),
+  /** itemId of the equipped gear in each slot, or "" if none. See shared/gear.ts. */
+  equippedWeapon: t.string(),
+  equippedArmor: t.string(),
 });
 export type Player = SchemaType<typeof Player>;
 
