@@ -2,6 +2,7 @@ import { Room, Client, CloseCode, validate, type StepContext } from "colyseus";
 import { z } from "zod";
 import { MyRoomState, Player, Mob, MoveInput } from "./schema/MyRoomState.js";
 import { rollDrop } from "../shared/items.js";
+import { SHOP_CATALOG, SHOP_CURRENCY_ITEM, RECIPES, CONSUMABLES } from "../shared/economy.js";
 import { MOB_TYPES } from "../shared/mobTypes.js";
 import { stepEntity, moveToward } from "../shared/movement.js";
 import {
@@ -76,7 +77,60 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     attack: validate(z.object({ mobId: z.string() }), function (this: MyRoom, client: Client, message: { mobId: string }) {
       this.handleAttack(client, message.mobId);
     }),
+    buy: validate(z.object({ itemId: z.string() }), function (this: MyRoom, client: Client, message: { itemId: string }) {
+      this.handleBuy(client, message.itemId);
+    }),
+    craft: validate(z.object({ recipeId: z.string() }), function (this: MyRoom, client: Client, message: { recipeId: string }) {
+      this.handleCraft(client, message.recipeId);
+    }),
+    use: validate(z.object({ itemId: z.string() }), function (this: MyRoom, client: Client, message: { itemId: string }) {
+      this.handleUse(client, message.itemId);
+    }),
   };
+
+  private handleBuy(client: Client, itemId: string) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) { return; }
+
+    const entry = SHOP_CATALOG.find((e) => e.itemId === itemId);
+    if (!entry) { return; }
+
+    const gold = player.inventory.get(SHOP_CURRENCY_ITEM) ?? 0;
+    if (gold < entry.price) { return; }
+
+    player.inventory.set(SHOP_CURRENCY_ITEM, gold - entry.price);
+    player.inventory.set(itemId, (player.inventory.get(itemId) ?? 0) + 1);
+  }
+
+  private handleCraft(client: Client, recipeId: string) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) { return; }
+
+    const recipe = RECIPES[recipeId];
+    if (!recipe) { return; }
+
+    for (const [itemId, qty] of Object.entries(recipe.inputs)) {
+      if ((player.inventory.get(itemId) ?? 0) < qty) { return; } // missing materials
+    }
+    for (const [itemId, qty] of Object.entries(recipe.inputs)) {
+      player.inventory.set(itemId, (player.inventory.get(itemId) ?? 0) - qty);
+    }
+    player.inventory.set(recipe.id, (player.inventory.get(recipe.id) ?? 0) + recipe.outputQty);
+  }
+
+  private handleUse(client: Client, itemId: string) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) { return; }
+
+    const consumable = CONSUMABLES[itemId];
+    if (!consumable) { return; }
+
+    const qty = player.inventory.get(itemId) ?? 0;
+    if (qty <= 0 || player.hp >= player.maxHp) { return; }
+
+    player.inventory.set(itemId, qty - 1);
+    player.hp = Math.min(player.maxHp, player.hp + consumable.healAmount);
+  }
 
   onCreate(options: any) {
     this.setFixedTimestep((ctx) => this.step(ctx), TICK_RATE);
