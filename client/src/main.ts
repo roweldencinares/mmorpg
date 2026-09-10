@@ -8,6 +8,27 @@ const SERVER_URL = "ws://localhost:2567";
 // MoveInput fields mirror server's src/rooms/schema/MyRoomState.ts
 type MoveInput = { moveX: -1 | 0 | 1; moveY: -1 | 0 | 1 };
 
+// Mirrors server's shared/constants.ts + shared/movement.ts's stepEntity() —
+// needed so OUR OWN player can be locally predicted every rendered frame
+// instead of only moving when a network patch arrives. Without this, the
+// click-to-move direction was computed from a position that only updated at
+// network-patch cadence: several frames' worth of movement would land in one
+// patch, overshoot the target, and the very next frame — now past it — would
+// compute the opposite direction, which read as circling/shaking right as
+// the character approached its destination (far from it, an overshoot of a
+// few units doesn't flip the sign, so it looked fine — the bug only showed
+// up on arrival, exactly where it was reported).
+const PLAYER_SPEED = 260;
+const PLAYER_HALF = 12;
+const clampNum = (value: number, min: number, max: number) => (value < min ? min : value > max ? max : value);
+function predictStep(pos: { x: number; y: number }, moveX: number, moveY: number, dt: number) {
+  let dirX = moveX;
+  let dirY = moveY;
+  if (dirX !== 0 && dirY !== 0) { dirX *= Math.SQRT1_2; dirY *= Math.SQRT1_2; }
+  pos.x = clampNum(pos.x + dirX * PLAYER_SPEED * dt, PLAYER_HALF, ARENA_WIDTH - PLAYER_HALF);
+  pos.y = clampNum(pos.y + dirY * PLAYER_SPEED * dt, PLAYER_HALF, ARENA_HEIGHT - PLAYER_HALF);
+}
+
 // Mirrors server's shared/items.ts ITEM_TABLE — display names/colors only,
 // the server is the source of truth for what items exist and what they mean.
 // Fixed order keeps HUD slots from jumping around as items are picked up.
@@ -128,6 +149,11 @@ class WorldScene extends Phaser.Scene {
   private myInput?: InputHandle<MoveInput>;
   private mySessionId?: string;
   private clickTarget?: { x: number; y: number };
+  /** Locally-predicted position for OUR OWN player, advanced every rendered
+   *  frame (see predictStep()) instead of only moving on network patches —
+   *  this is what movement-direction math and our own avatar's rendering
+   *  read, so both stay based on a fresh position instead of a stale one. */
+  private myPredicted?: { x: number; y: number };
 
   private room?: any;
   private mobs = new Map<string, MobView>();
@@ -1058,6 +1084,7 @@ class WorldScene extends Phaser.Scene {
       $(room.state).players.onAdd((player, sessionId) => {
         const isMe = sessionId === room.sessionId;
         this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, mana: player.mana, maxMana: player.maxMana, level: player.level, xp: player.xp, zone: player.zone, equippedWeapon: player.equippedWeapon, equippedArmor: player.equippedArmor });
+        if (isMe) { this.myPredicted = { x: player.x, y: player.y }; }
 
         const avatar = this.add.sprite(player.x, player.y, "player")
           .setDisplaySize(40, 56)
@@ -1108,13 +1135,29 @@ class WorldScene extends Phaser.Scene {
           const dmg = prevHp - player.hp;
           if (dmg > 0) { this.spawnFloatingText(player.x, player.y - 30, `-${dmg}`, "#f87171"); }
 
+          if (isMe && this.myPredicted) {
+            // Reconcile the local prediction against server truth: a small
+            // gap is normal (prediction runs ahead between patches), so just
+            // nudge it closed; a large one (respawn, zone transition, a wall
+            // correction) means predicted has genuinely desynced — snap.
+            const gap = Math.hypot(player.x - this.myPredicted.x, player.y - this.myPredicted.y);
+            if (gap > 40) {
+              this.myPredicted.x = player.x; this.myPredicted.y = player.y;
+            } else {
+              this.myPredicted.x += (player.x - this.myPredicted.x) * 0.3;
+              this.myPredicted.y += (player.y - this.myPredicted.y) * 0.3;
+            }
+          }
+          const renderX = isMe && this.myPredicted ? this.myPredicted.x : player.x;
+          const renderY = isMe && this.myPredicted ? this.myPredicted.y : player.y;
+
           const alive = player.hp > 0;
-          avatar.setPosition(player.x, player.y).setAlpha(alive ? 1 : 0.3);
+          avatar.setPosition(renderX, renderY).setAlpha(alive ? 1 : 0.3);
           this.setWalking(avatar, "player", alive && Math.hypot(player.vx, player.vy) > 1);
           if (player.vx > 1) { avatar.setFlipX(false); } else if (player.vx < -1) { avatar.setFlipX(true); }
-          label.setPosition(player.x, player.y - 38);
-          hpBg.setPosition(player.x, player.y - 46);
-          hpFill.setPosition(player.x - barWidth / 2, player.y - 46);
+          label.setPosition(renderX, renderY - 38);
+          hpBg.setPosition(renderX, renderY - 46);
+          hpFill.setPosition(renderX - barWidth / 2, renderY - 46);
           hpFill.width = barWidth * Phaser.Math.Clamp(player.hp / player.maxHp, 0, 1);
           syncVisibility();
 
@@ -1232,8 +1275,9 @@ class WorldScene extends Phaser.Scene {
       return;
     }
 
-    if (me) {
-      this.rangeIndicator.setPosition(me.x, me.y).setVisible(!!this.attackTargetId);
+    const myPos = this.myPredicted ?? me;
+    if (myPos) {
+      this.rangeIndicator.setPosition(myPos.x, myPos.y).setVisible(!!this.attackTargetId);
     }
 
     const left = this.cursors.left.isDown || this.wasd.A.isDown;
@@ -1253,17 +1297,16 @@ class WorldScene extends Phaser.Scene {
       moveY = ((down ? 1 : 0) - (up ? 1 : 0)) as -1 | 0 | 1;
     } else if (this.attackTargetId) {
       const mob = this.mobs.get(this.attackTargetId);
-      const me = this.mySessionId && this.sprites.get(this.mySessionId);
       if (!mob || !mob.alive) {
         // Target died — auto-attack keeps going by picking up the nearest
         // living mob instead of just stopping, so kills don't require a
         // re-click every time.
-        if (me) { this.tryAutoRetarget(me.x, me.y); } else { this.clearAttackTarget(); }
-      } else if (!me) {
+        if (myPos) { this.tryAutoRetarget(myPos.x, myPos.y); } else { this.clearAttackTarget(); }
+      } else if (!myPos) {
         this.clearAttackTarget();
       } else {
-        const dx = mob.x - me.x;
-        const dy = mob.y - me.y;
+        const dx = mob.x - myPos.x;
+        const dy = mob.y - myPos.y;
         if (Math.hypot(dx, dy) > MOB_ATTACK_RANGE) {
           moveX = Math.sign(dx) as -1 | 0 | 1;
           moveY = Math.sign(dy) as -1 | 0 | 1;
@@ -1276,10 +1319,9 @@ class WorldScene extends Phaser.Scene {
         }
       }
     } else if (this.clickTarget) {
-      const me = this.mySessionId && this.sprites.get(this.mySessionId);
-      if (me) {
-        const dx = this.clickTarget.x - me.x;
-        const dy = this.clickTarget.y - me.y;
+      if (myPos) {
+        const dx = this.clickTarget.x - myPos.x;
+        const dy = this.clickTarget.y - myPos.y;
         if (Math.hypot(dx, dy) <= ARRIVE_THRESHOLD) {
           this.clearClickTarget();
         } else {
@@ -1292,6 +1334,16 @@ class WorldScene extends Phaser.Scene {
     this.myInput.data.moveX = moveX;
     this.myInput.data.moveY = moveY;
     this.myInput.send();
+
+    // Advance the local prediction every rendered frame (not just when a
+    // network patch arrives — see myPredicted's field comment) and move our
+    // own avatar to match immediately, so movement is smooth and the NEXT
+    // frame's direction math (above) is always based on a fresh position.
+    if (this.myPredicted) {
+      predictStep(this.myPredicted, moveX, moveY, this.game.loop.delta / 1000);
+      const myAvatar = this.mySessionId ? this.sprites.get(this.mySessionId) : undefined;
+      myAvatar?.setPosition(this.myPredicted.x, this.myPredicted.y);
+    }
   }
 }
 
