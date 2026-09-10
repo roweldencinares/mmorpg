@@ -205,36 +205,91 @@ class WorldScene extends Phaser.Scene {
       g.generateTexture(key, width, height);
     };
 
-    // Player: drawn near-white so setTint() can recolor it per-player (see
-    // isMe/other tinting below) without redrawing the shape.
+    const shadow = (cx: number, cy: number, rx: number, ry: number) => {
+      g.fillStyle(0x000000, 0.25);
+      g.fillEllipse(cx, cy, rx * 2, ry * 2);
+    };
+
+    // Player: a small articulated figure (legs/torso/arms/head/face), drawn
+    // near-white so setTint() can still recolor it per-player (isMe/other,
+    // set where the sprite is created) without redrawing the shape.
     bake("player", 40, 56, () => {
+      shadow(20, 52, 13, 4);
       g.fillStyle(0xf3f4f6, 1);
-      g.fillCircle(20, 14, 10);
-      g.fillRoundedRect(7, 23, 26, 31, 7);
+      g.fillRoundedRect(13, 40, 6, 13, 2);   // left leg
+      g.fillRoundedRect(21, 40, 6, 13, 2);   // right leg
+      g.fillRoundedRect(4, 24, 6, 17, 3);    // left arm
+      g.fillRoundedRect(30, 24, 6, 17, 3);   // right arm
+      g.fillRoundedRect(9, 21, 22, 24, 8);   // torso
+      g.fillCircle(20, 13, 10);              // head
+      g.fillStyle(0x1f2937, 1);
+      g.fillCircle(16, 12, 1.6);             // eyes
+      g.fillCircle(24, 12, 1.6);
     });
 
+    // Rat: a low, ground-hugging rodent — round body, forward snout, ears,
+    // and a curved tail — read top-down rather than the humanoid stand-in.
     bake("mob-rat", 36, 50, () => {
+      shadow(18, 45, 13, 4);
       g.fillStyle(0x9ca3af, 1);
-      g.fillTriangle(9, 17, 13, 6, 18, 17);
-      g.fillTriangle(18, 17, 23, 6, 27, 17);
-      g.fillEllipse(18, 32, 22, 26);
-      g.fillRect(27, 36, 8, 3);
+      g.lineStyle(3, 0x9ca3af, 1);
+      g.beginPath();
+      g.moveTo(25, 34);
+      g.lineTo(31, 39);
+      g.lineTo(29, 45);
+      g.strokePath();                        // tail
+      g.fillCircle(11, 17, 4);               // left ear
+      g.fillCircle(23, 17, 4);               // right ear
+      g.fillEllipse(17, 30, 22, 20);         // body
+      g.fillTriangle(10, 21, 17, 12, 22, 21); // snout
+      g.fillStyle(0xf9a8d4, 1);
+      g.fillCircle(11, 17, 2);               // inner ear
+      g.fillCircle(23, 17, 2);
+      g.fillStyle(0x1f2937, 1);
+      g.fillCircle(13, 26, 1.6);             // eyes
+      g.fillCircle(21, 26, 1.6);
+      g.fillCircle(17, 16, 1.4);             // nose
     });
 
+    // Slime: classic gel teardrop — rounded top tapering to a flatter base,
+    // with a glossy highlight and a simple face.
     bake("mob-slime", 36, 50, () => {
+      shadow(18, 45, 13, 4);
+      g.fillStyle(0x0ea5e9, 1);
+      g.fillRoundedRect(4, 14, 28, 32, { tl: 14, tr: 14, bl: 5, br: 5 });
       g.fillStyle(0x38bdf8, 1);
-      g.fillRoundedRect(4, 18, 28, 28, 14);
+      g.fillRoundedRect(6, 18, 24, 24, { tl: 12, tr: 12, bl: 4, br: 4 });
+      g.fillStyle(0xffffff, 0.4);
+      g.fillEllipse(13, 22, 10, 7);          // gloss highlight
       g.fillStyle(0x0c4a6e, 1);
-      g.fillCircle(14, 30, 2);
-      g.fillCircle(22, 30, 2);
+      g.fillCircle(14, 32, 2);               // eyes
+      g.fillCircle(22, 32, 2);
     });
 
+    // Wolf: a top-down quadruped — legs peeking from under an elongated
+    // body, pointed ears, snout, and a tail — clearly not humanoid.
     bake("mob-wolf", 36, 50, () => {
+      shadow(18, 46, 14, 4);
+      g.fillStyle(0x4a2408, 1);
+      g.fillEllipse(9, 27, 6, 10);            // legs (drawn under body)
+      g.fillEllipse(27, 27, 6, 10);
+      g.fillEllipse(9, 40, 6, 10);
+      g.fillEllipse(27, 40, 6, 10);
+      g.lineStyle(4, 0x78350f, 1);
+      g.beginPath();
+      g.moveTo(18, 42);
+      g.lineTo(27, 47);
+      g.lineTo(31, 44);
+      g.strokePath();                         // tail
       g.fillStyle(0x78350f, 1);
-      g.fillTriangle(5, 18, 12, 1, 18, 18);
-      g.fillTriangle(18, 18, 24, 1, 31, 18);
-      g.fillEllipse(18, 34, 27, 30);
-      g.fillTriangle(11, 40, 18, 49, 25, 40);
+      g.fillTriangle(9, 19, 14, 6, 19, 19);   // left ear
+      g.fillTriangle(17, 19, 22, 6, 27, 19);  // right ear
+      g.fillEllipse(18, 30, 24, 28);          // body
+      g.fillTriangle(13, 12, 18, 3, 23, 12);  // snout
+      g.fillStyle(0x1f2937, 1);
+      g.fillCircle(15, 22, 1.6);              // eyes
+      g.fillCircle(21, 22, 1.6);
+      g.fillCircle(18, 10, 1.4);              // nose
     });
 
     bake("icon-coin", 22, 22, () => {
@@ -242,6 +297,8 @@ class WorldScene extends Phaser.Scene {
       g.fillCircle(11, 11, 9);
       g.lineStyle(2, 0xca8a04, 1);
       g.strokeCircle(11, 11, 8);
+      g.fillStyle(0xffffff, 0.4);
+      g.fillEllipse(8, 8, 6, 4);              // shine
     });
 
     bake("icon-potion", 22, 22, () => {
@@ -251,11 +308,15 @@ class WorldScene extends Phaser.Scene {
       g.fillRoundedRect(5, 7, 12, 13, 4);
       g.lineStyle(1, 0x991b1b, 1);
       g.strokeRoundedRect(5, 7, 12, 13, 4);
+      g.fillStyle(0xffffff, 0.5);
+      g.fillRoundedRect(7, 10, 2, 7, 1);      // glass shine
     });
 
     bake("icon-dagger", 22, 22, () => {
       g.fillStyle(0xd1d5db, 1);
       g.fillTriangle(11, 1, 8, 13, 14, 13);
+      g.fillStyle(0x9ca3af, 1);
+      g.fillRect(10, 3, 1, 9);                // blade fuller
       g.fillStyle(0x8b5a2b, 1);
       g.fillRect(7, 15, 8, 3);
       g.fillRect(9, 15, 4, 6);
@@ -270,6 +331,9 @@ class WorldScene extends Phaser.Scene {
       g.moveTo(11, 3);
       g.lineTo(11, 19);
       g.strokePath();
+      g.fillStyle(0x78350f, 1);
+      g.fillCircle(7, 8, 1);                  // rivets
+      g.fillCircle(15, 8, 1);
     });
 
     g.destroy();
