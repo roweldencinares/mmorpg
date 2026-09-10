@@ -78,9 +78,15 @@ class WorldScene extends Phaser.Scene {
   private players = new Map<string, PlayerView>();
 
   private questText!: Phaser.GameObjects.Text;
-  private toastText!: Phaser.GameObjects.Text;
+  // Toasts stack vertically (up to MAX_VISIBLE_TOASTS at once) instead of a
+  // single shared slot — each occupies its own row and fades out on its own
+  // timer, so a loot toast and a bestiary toast firing close together can
+  // both be visible simultaneously rather than strictly serialized.
+  private static readonly MAX_VISIBLE_TOASTS = 3;
+  private static readonly TOAST_BASE_Y = 100;
+  private static readonly TOAST_LINE_HEIGHT = 22;
+  private toastSlots: (Phaser.GameObjects.Text | null)[] = new Array(WorldScene.MAX_VISIBLE_TOASTS).fill(null);
   private toastQueue: { text: string; color: string }[] = [];
-  private toastBusy = false;
 
   private deathOverlayBg!: Phaser.GameObjects.Rectangle;
   private deathOverlayTitle!: Phaser.GameObjects.Text;
@@ -133,14 +139,6 @@ class WorldScene extends Phaser.Scene {
       color: "#facc15",
       align: "right",
     }).setOrigin(1, 0.5).setDepth(2);
-
-    this.toastText = this.add.text(ARENA_WIDTH / 2, 100, "", {
-      fontFamily: "monospace",
-      fontSize: "13px",
-      color: "#ffffff",
-      backgroundColor: "#000000aa",
-      padding: { x: 8, y: 4 },
-    }).setOrigin(0.5).setVisible(false).setDepth(10);
 
     const tooltip = this.add.text(0, 0, "", {
       fontFamily: "monospace",
@@ -257,7 +255,11 @@ class WorldScene extends Phaser.Scene {
   }
 
   private spawnFloatingText(x: number, y: number, text: string, color: string) {
-    const label = this.add.text(x, y, text, {
+    // Small random horizontal jitter so back-to-back hits on the same target
+    // don't spawn their numbers on top of each other and smear into mush.
+    const jitterX = x + Phaser.Math.Between(-12, 12);
+
+    const label = this.add.text(jitterX, y, text, {
       fontFamily: "monospace",
       fontSize: "16px",
       color,
@@ -280,23 +282,36 @@ class WorldScene extends Phaser.Scene {
   }
 
   private drainToastQueue() {
-    if (this.toastBusy || this.toastQueue.length === 0) return;
-    const next = this.toastQueue.shift()!;
-    this.toastBusy = true;
-    this.toastText.setText(next.text).setColor(next.color).setAlpha(1).setVisible(true);
+    for (let slot = 0; slot < WorldScene.MAX_VISIBLE_TOASTS; slot++) {
+      if (this.toastSlots[slot]) continue;
+      const next = this.toastQueue.shift();
+      if (!next) return;
 
-    this.time.delayedCall(1200, () => {
-      this.tweens.add({
-        targets: this.toastText,
-        alpha: 0,
-        duration: 300,
-        onComplete: () => {
-          this.toastText.setVisible(false);
-          this.toastBusy = false;
-          this.drainToastQueue();
-        },
+      const y = WorldScene.TOAST_BASE_Y + slot * WorldScene.TOAST_LINE_HEIGHT;
+      const toast = this.add.text(ARENA_WIDTH / 2, y, next.text, {
+        fontFamily: "monospace",
+        fontSize: "13px",
+        color: next.color,
+        backgroundColor: "#000000aa",
+        padding: { x: 8, y: 4 },
+      }).setOrigin(0.5).setDepth(10);
+      this.toastSlots[slot] = toast;
+
+      // Each toast fades out on its own independent timer, so one slot
+      // freeing up doesn't affect the fade timing of the others.
+      this.time.delayedCall(1200, () => {
+        this.tweens.add({
+          targets: toast,
+          alpha: 0,
+          duration: 300,
+          onComplete: () => {
+            toast.destroy();
+            if (this.toastSlots[slot] === toast) this.toastSlots[slot] = null;
+            this.drainToastQueue();
+          },
+        });
       });
-    });
+    }
   }
 
   private async connect() {
