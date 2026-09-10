@@ -3,15 +3,20 @@ import { z } from "zod";
 import { MyRoomState, Player, Mob, MoveInput } from "./schema/MyRoomState.js";
 import { rollDrop } from "../shared/items.js";
 import { MOB_TYPES } from "../shared/mobTypes.js";
-import { stepEntity } from "../shared/movement.js";
+import { stepEntity, moveToward } from "../shared/movement.js";
 import {
-  TICK_RATE, ARENA_WIDTH, ARENA_HEIGHT,
+  TICK_RATE, ARENA_WIDTH, ARENA_HEIGHT, PLAYER_HALF,
   MOB_ATTACK_RANGE, MOB_ATTACK_DAMAGE, MOB_ATTACK_COOLDOWN_MS, MOB_RESPAWN_MS,
   PLAYER_MAX_HP, MOB_DAMAGE_TO_PLAYER, MOB_ATTACK_INTERVAL_MS, PLAYER_RESPAWN_MS,
   QUEST_KILL_TARGET, QUEST_REWARD_ITEM, QUEST_REWARD_QTY,
+  MOB_NOTICE_RANGE, MOB_WANDER_SPEED, MOB_CHASE_SPEED, MOB_WANDER_RADIUS,
+  MOB_WANDER_PAUSE_MIN_MS, MOB_WANDER_PAUSE_MAX_MS, MOB_WANDER_ARRIVE_DIST,
 } from "../shared/constants.js";
 
-/** Fixed spawn points for the first pass — no wandering AI yet. */
+const clamp = (value: number, min: number, max: number) =>
+  (value < min ? min : value > max ? max : value);
+
+/** Fixed spawn points — mobs wander/chase from here but always return to it. */
 const MOB_SPAWNS = [
   { x: 200, y: 150, type: "rat" },
   { x: 600, y: 150, type: "rat" },
@@ -42,6 +47,18 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
   /** Per-mob attack cooldown against players, server-side wall clock. */
   private lastMobAttackAt = new Map<string, number>();
 
+  /** mobId -> its fixed spawn point, so wander/leash math always has a home to measure from. */
+  private mobSpawns = new Map<string, { x: number; y: number }>();
+
+  /** mobId -> current wander destination, chosen within MOB_WANDER_RADIUS of spawn. */
+  private mobWanderTarget = new Map<string, { x: number; y: number }>();
+
+  /** mobId -> wall-clock time it's allowed to pick its next wander destination. */
+  private mobNextWanderAt = new Map<string, number>();
+
+  /** mobId -> sessionId of the player it has noticed and is chasing, if any. */
+  private mobAggroTarget = new Map<string, string>();
+
   messages = {
     // movement arrives through the input buffer above — register handlers here
     // only for things that are not inputs (chat, emotes, …).
@@ -54,10 +71,12 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     this.setFixedTimestep((ctx) => this.step(ctx), TICK_RATE);
 
     MOB_SPAWNS.forEach((pos, i) => {
+      const mobId = `mob-${i}`;
       const maxHp = MOB_TYPES[pos.type].maxHp;
-      this.state.mobs.set(`mob-${i}`, new Mob({
+      this.state.mobs.set(mobId, new Mob({
         x: pos.x, y: pos.y, hp: maxHp, maxHp, alive: true, type: pos.type,
       }));
+      this.mobSpawns.set(mobId, { x: pos.x, y: pos.y });
     });
   }
 
@@ -77,7 +96,12 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
 
     if (mob.hp === 0) {
       mob.alive = false;
+      this.mobAggroTarget.delete(mobId); // dead mobs don't keep chasing on respawn
       this.clock.setTimeout(() => {
+        const spawn = this.mobSpawns.get(mobId);
+        if (spawn) { mob.x = spawn.x; mob.y = spawn.y; }
+        this.mobWanderTarget.delete(mobId);
+        this.mobNextWanderAt.delete(mobId);
         mob.hp = mob.maxHp;
         mob.alive = true;
       }, MOB_RESPAWN_MS);
@@ -143,13 +167,115 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       }
     }
 
+    this.stepMobAI(ctx.dt);
     this.stepMobAttacks();
+  }
+
+  /**
+   * Simple wander/aggro AI, run before attacks so a mob that just noticed or
+   * caught up to a player is already in range when stepMobAttacks() checks.
+   *
+   * - No aggro yet: wander to random points within MOB_WANDER_RADIUS of the
+   *   mob's own spawn, pausing briefly at each one, until a living player
+   *   comes within MOB_NOTICE_RANGE.
+   * - Aggro'd: walk straight at that player (no pathfinding) until either
+   *   it's close enough for stepMobAttacks() to land hits, or the player
+   *   drifts back outside MOB_NOTICE_RANGE — at which point aggro drops and
+   *   the mob resumes wandering near its spawn.
+   */
+  private stepMobAI(dt: number) {
+    const now = this.clock.currentTime;
+
+    for (const [mobId, mob] of this.state.mobs) {
+      if (!mob.alive) { continue; }
+      const spawn = this.mobSpawns.get(mobId);
+      if (!spawn) { continue; }
+
+      let aggroId = this.mobAggroTarget.get(mobId);
+
+      // Drop aggro if the target left, died, or wandered back out of notice range.
+      if (aggroId) {
+        const target = this.state.players.get(aggroId);
+        if (!target || target.hp <= 0 || Math.hypot(target.x - mob.x, target.y - mob.y) > MOB_NOTICE_RANGE) {
+          this.mobAggroTarget.delete(mobId);
+          aggroId = undefined;
+        }
+      }
+
+      // Not chasing anyone — see if a living player just wandered into notice range.
+      if (!aggroId) {
+        let nearestId: string | undefined;
+        let nearestDist = MOB_NOTICE_RANGE;
+        for (const [sessionId, player] of this.state.players) {
+          if (player.hp <= 0) { continue; }
+          const dist = Math.hypot(player.x - mob.x, player.y - mob.y);
+          if (dist <= nearestDist) {
+            nearestDist = dist;
+            nearestId = sessionId;
+          }
+        }
+        if (nearestId) {
+          this.mobAggroTarget.set(mobId, nearestId);
+          aggroId = nearestId;
+        }
+      }
+
+      if (aggroId) {
+        const target = this.state.players.get(aggroId)!;
+        // Stop short of stacking exactly on the player once within attack range.
+        if (Math.hypot(target.x - mob.x, target.y - mob.y) > MOB_ATTACK_RANGE * 0.6) {
+          moveToward(mob, target.x, target.y, MOB_CHASE_SPEED, dt);
+        }
+        continue;
+      }
+
+      this.stepMobWander(mobId, mob, spawn, now, dt);
+    }
+  }
+
+  /** Idle wandering for one mob with no current aggro target. */
+  private stepMobWander(
+    mobId: string,
+    mob: Mob,
+    spawn: { x: number; y: number },
+    now: number,
+    dt: number,
+  ) {
+    let target = this.mobWanderTarget.get(mobId);
+    const arrived = !target || Math.hypot(target.x - mob.x, target.y - mob.y) <= MOB_WANDER_ARRIVE_DIST;
+
+    if (arrived && now >= (this.mobNextWanderAt.get(mobId) ?? 0)) {
+      target = this.pickWanderPoint(spawn);
+      this.mobWanderTarget.set(mobId, target);
+      const pause = MOB_WANDER_PAUSE_MIN_MS + Math.random() * (MOB_WANDER_PAUSE_MAX_MS - MOB_WANDER_PAUSE_MIN_MS);
+      this.mobNextWanderAt.set(mobId, now + pause);
+    }
+
+    if (target && !arrived) {
+      moveToward(mob, target.x, target.y, MOB_WANDER_SPEED, dt);
+    }
+  }
+
+  /**
+   * A random point within MOB_WANDER_RADIUS of `spawn`. Both this point and
+   * the mob's current position (always inside that same disk — see above)
+   * mean the straight-line walk between them never leaves it either, so a
+   * wandering mob can never drift further than MOB_WANDER_RADIUS from home.
+   */
+  private pickWanderPoint(spawn: { x: number; y: number }): { x: number; y: number } {
+    const angle = Math.random() * Math.PI * 2;
+    const radius = Math.random() * MOB_WANDER_RADIUS;
+    return {
+      x: clamp(spawn.x + Math.cos(angle) * radius, PLAYER_HALF, ARENA_WIDTH - PLAYER_HALF),
+      y: clamp(spawn.y + Math.sin(angle) * radius, PLAYER_HALF, ARENA_HEIGHT - PLAYER_HALF),
+    };
   }
 
   /**
    * Mobs hit back: any living mob whose cooldown is up deals damage to the
    * first living player found in range. One target per mob per cooldown —
-   * no cleave, no aggro persistence, first pass only.
+   * no cleave. (Aggro/chase toward that range is handled by stepMobAI()
+   * above; this only lands the hit once a player is already close enough.)
    */
   private stepMobAttacks() {
     const now = this.clock.currentTime;

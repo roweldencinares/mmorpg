@@ -48,3 +48,26 @@ export function stepEntity(entity: EntityState, input: MoveInputLike, dt: number
   entity.vx = vx;
   entity.vy = vy;
 }
+
+/**
+ * Straight-line step toward a fixed point, at most `speed * dt` units,
+ * never overshooting. No walls, no velocity bookkeeping — this is the
+ * simple mob-AI counterpart to `stepEntity` above, not a replacement for it:
+ * mobs have no input to predict/replay, so there's nothing to reconcile.
+ */
+export function moveToward(
+  entity: { x: number; y: number },
+  targetX: number,
+  targetY: number,
+  speed: number,
+  dt: number,
+): void {
+  const dx = targetX - entity.x;
+  const dy = targetY - entity.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 0.0001) { return; }
+
+  const step = Math.min(speed * dt, dist);
+  entity.x += (dx / dist) * step;
+  entity.y += (dy / dist) * step;
+}
