@@ -5,19 +5,28 @@ import { rollDrop } from "../shared/items.js";
 import { MOB_TYPES } from "../shared/mobTypes.js";
 import { stepEntity } from "../shared/movement.js";
 import {
-  TICK_RATE, ARENA_WIDTH, ARENA_HEIGHT,
+  TICK_RATE, ARENA_WIDTH, ARENA_HEIGHT, PLAYER_HALF,
   MOB_ATTACK_RANGE, MOB_ATTACK_DAMAGE, MOB_ATTACK_COOLDOWN_MS, MOB_RESPAWN_MS,
   PLAYER_MAX_HP, MOB_DAMAGE_TO_PLAYER, MOB_ATTACK_INTERVAL_MS, PLAYER_RESPAWN_MS,
   QUEST_KILL_TARGET, QUEST_REWARD_ITEM, QUEST_REWARD_QTY,
+  ZONE_START, ZONE_FOREST, ZONE_TRANSITION_INSET,
 } from "../shared/constants.js";
 
-/** Fixed spawn points for the first pass — no wandering AI yet. */
+/**
+ * Fixed spawn points for the first pass — no wandering AI yet. Two zones
+ * share the same 0-800/0-600 coordinate space; `zone` is what actually keeps
+ * them apart, both here and everywhere else mobs/players are compared.
+ */
 const MOB_SPAWNS = [
-  { x: 200, y: 150, type: "rat" },
-  { x: 600, y: 150, type: "rat" },
-  { x: 200, y: 450, type: "slime" },
-  { x: 600, y: 450, type: "slime" },
-  { x: 400, y: 300, type: "wolf" },
+  { x: 200, y: 150, type: "rat", zone: ZONE_START },
+  { x: 600, y: 150, type: "rat", zone: ZONE_START },
+  { x: 200, y: 450, type: "slime", zone: ZONE_START },
+  { x: 600, y: 450, type: "slime", zone: ZONE_START },
+  { x: 400, y: 300, type: "wolf", zone: ZONE_START },
+  // Second zone, reachable by walking off the right edge of the start arena.
+  { x: 200, y: 150, type: "wolf", zone: ZONE_FOREST },
+  { x: 600, y: 450, type: "wolf", zone: ZONE_FOREST },
+  { x: 400, y: 300, type: "slime", zone: ZONE_FOREST },
 ];
 
 export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
@@ -56,7 +65,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     MOB_SPAWNS.forEach((pos, i) => {
       const maxHp = MOB_TYPES[pos.type].maxHp;
       this.state.mobs.set(`mob-${i}`, new Mob({
-        x: pos.x, y: pos.y, hp: maxHp, maxHp, alive: true, type: pos.type,
+        x: pos.x, y: pos.y, zone: pos.zone, hp: maxHp, maxHp, alive: true, type: pos.type,
       }));
     });
   }
@@ -65,6 +74,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     const player = this.state.players.get(client.sessionId);
     const mob = this.state.mobs.get(mobId);
     if (!player || player.hp <= 0 || !mob || !mob.alive) { return; }
+    if (player.zone !== mob.zone) { return; } // never allow cross-zone combat
 
     const now = this.clock.currentTime;
     const last = this.lastAttackAt.get(client.sessionId) ?? 0;
@@ -109,6 +119,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       y: ARENA_HEIGHT / 2 + Math.sin(angle) * 80,
       vx: 0,
       vy: 0,
+      zone: ZONE_START,
       hp: PLAYER_MAX_HP,
       maxHp: PLAYER_MAX_HP,
       questKills: 0,
@@ -141,9 +152,26 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       for (const input of channel) {
         stepEntity(player, input, ctx.dt);
       }
+
+      this.maybeTransitionZone(player);
     }
 
     this.stepMobAttacks();
+  }
+
+  /**
+   * Zones are logically separate but numerically share the 0-800/0-600
+   * space, so a transition is just: pin against the far wall of your
+   * current zone, pop out just inside the near wall of the other one.
+   */
+  private maybeTransitionZone(player: Player) {
+    if (player.zone === ZONE_START && player.x >= ARENA_WIDTH - PLAYER_HALF) {
+      player.zone = ZONE_FOREST;
+      player.x = PLAYER_HALF + ZONE_TRANSITION_INSET;
+    } else if (player.zone === ZONE_FOREST && player.x <= PLAYER_HALF) {
+      player.zone = ZONE_START;
+      player.x = ARENA_WIDTH - PLAYER_HALF - ZONE_TRANSITION_INSET;
+    }
   }
 
   /**
@@ -162,6 +190,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
 
       for (const [sessionId, player] of this.state.players) {
         if (player.hp <= 0) { continue; }
+        if (player.zone !== mob.zone) { continue; } // never allow cross-zone combat
         if (Math.hypot(player.x - mob.x, player.y - mob.y) > MOB_ATTACK_RANGE) { continue; }
 
         this.lastMobAttackAt.set(mobId, now);

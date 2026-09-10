@@ -36,3 +36,14 @@ export const PLAYER_RESPAWN_MS = 3000;
 export const QUEST_KILL_TARGET = 10;
 export const QUEST_REWARD_ITEM = "gold_coin";
 export const QUEST_REWARD_QTY = 10;
+
+/**
+ * Zone identifiers. Both zones reuse the same 0-800/0-600 coordinate space —
+ * they are logically separate rather than laid out side by side — so a mob
+ * or player is only ever compared against others sharing its `zone` field.
+ */
+export const ZONE_START = "start";
+export const ZONE_FOREST = "forest";
+
+/** How far past the near edge a player is placed after crossing into a zone. */
+export const ZONE_TRANSITION_INSET = 20;

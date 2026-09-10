@@ -6,7 +6,7 @@ Small, independently-shippable next steps for the MMORPG prototype (Colyseus ser
 - [ ] Player leveling/XP — kills currently only feed the bestiary/quest counters and drop loot; add a level + XP bar with a small stat bump per level (e.g. +maxHp).
 - [ ] Full "You Died" overlay — death currently just swaps the HP HUD text to "respawning..."; add a full-screen dim + centered "You Died" text that clears on respawn.
 - [ ] Toast/floating-text polish — simultaneous loot toasts queue awkwardly and floating damage numbers from rapid hits can visually overlap; smooth this out (e.g. stack toasts, offset overlapping floating text).
-- [ ] A second connected zone — everything currently lives in one 800x600 arena; add a second arena reachable via an edge transition (server tracks which room/zone a player is in).
+- [x] A second connected zone — everything currently lives in one 800x600 arena; add a second arena reachable via an edge transition (server tracks which room/zone a player is in).
 
 ## Notes for an autonomous run
 
