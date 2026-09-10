@@ -125,7 +125,6 @@ class WorldScene extends Phaser.Scene {
   private myInput?: InputHandle<MoveInput>;
   private mySessionId?: string;
   private clickTarget?: { x: number; y: number };
-  private targetMarker?: Phaser.GameObjects.Arc;
 
   private room?: any;
   private mobs = new Map<string, MobView>();
@@ -778,14 +777,10 @@ class WorldScene extends Phaser.Scene {
       x: Phaser.Math.Clamp(x, 0, ARENA_WIDTH),
       y: Phaser.Math.Clamp(y, 0, ARENA_HEIGHT),
     };
-    this.targetMarker?.destroy();
-    this.targetMarker = this.add.circle(this.clickTarget.x, this.clickTarget.y, 5, 0x4ade80, 0.8);
   }
 
   private clearClickTarget() {
     this.clickTarget = undefined;
-    this.targetMarker?.destroy();
-    this.targetMarker = undefined;
   }
 
   private mobAt(x: number, y: number): string | undefined {
@@ -822,6 +817,23 @@ class WorldScene extends Phaser.Scene {
 
     this.room?.send("useSkill", { skillId, targetMobId: this.attackTargetId });
     this.skillLastUsedAt.set(skillId, this.time.now);
+
+    const me = this.mySessionId && this.players.get(this.mySessionId);
+    if (me) { this.spawnCastEffect(me.x, me.y, skill.kind === "heal" ? 0x4ade80 : 0xf97316); }
+  }
+
+  /** A quick expanding, fading ring at the caster — visible feedback that a skill actually fired. */
+  private spawnCastEffect(x: number, y: number, color: number) {
+    const ring = this.add.circle(x, y, 14, color, 0)
+      .setStrokeStyle(3, color, 0.9).setDepth(15);
+    this.tweens.add({
+      targets: ring,
+      scale: 2.2,
+      alpha: 0,
+      duration: 350,
+      ease: "Cubic.Out",
+      onComplete: () => ring.destroy(),
+    });
   }
 
   /**
