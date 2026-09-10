@@ -52,6 +52,14 @@ const RECIPES: { id: string; name: string; inputs: Record<string, number> }[] = 
 ];
 const CONSUMABLE_ITEMS = new Set(["health_potion"]);
 
+// Mirrors server's shared/skills.ts — display data only, the server is the
+// source of truth for cost/cooldown/power and validates every cast.
+const SKILLS: { id: string; name: string; manaCost: number; cooldownMs: number; kind: "attack" | "heal" }[] = [
+  { id: "power_strike", name: "Power Strike", manaCost: 8, cooldownMs: 3000, kind: "attack" },
+  { id: "fireball", name: "Fireball", manaCost: 18, cooldownMs: 5000, kind: "attack" },
+  { id: "heal", name: "Heal", manaCost: 15, cooldownMs: 8000, kind: "heal" },
+];
+
 // Mirrors server's shared/gear.ts — display data only, the server validates
 // every equip/unequip and is the source of truth for slot/power values.
 const GEAR_CATALOG: Record<string, { slot: "weapon" | "armor"; name: string; power: number }> = {
@@ -106,7 +114,7 @@ const MOB_PICK_RADIUS = 24;
 const ATTACK_SEND_INTERVAL_MS = 350;
 
 interface MobView { x: number; y: number; hp: number; maxHp: number; alive: boolean; type: string; zone: string; }
-interface PlayerView { x: number; y: number; hp: number; maxHp: number; level: number; xp: number; zone: string; equippedWeapon: string; equippedArmor: string; }
+interface PlayerView { x: number; y: number; hp: number; maxHp: number; mana: number; maxMana: number; level: number; xp: number; zone: string; equippedWeapon: string; equippedArmor: string; }
 
 class WorldScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -131,6 +139,8 @@ class WorldScene extends Phaser.Scene {
 
   private hpText!: Phaser.GameObjects.Text;
   private hpBarFill!: Phaser.GameObjects.Rectangle;
+  private manaBarFill!: Phaser.GameObjects.Rectangle;
+  private manaText!: Phaser.GameObjects.Text;
   private levelText!: Phaser.GameObjects.Text;
   private xpBarFill!: Phaser.GameObjects.Rectangle;
   private powerText!: Phaser.GameObjects.Text;
@@ -171,6 +181,11 @@ class WorldScene extends Phaser.Scene {
   private settingsText!: Phaser.GameObjects.Text;
   private settingsPanelBounds!: { x: number; y: number; w: number; h: number };
   private settingsToggleBounds!: { x: number; y: number; w: number; h: number };
+
+  // --- Skill bar: bottom-center, one button per shared/skills.ts entry ---
+  private skillButtons: { bounds: { x: number; y: number; w: number; h: number }; cooldownOverlay: Phaser.GameObjects.Rectangle }[] = [];
+  /** Client-side optimistic cast time per skill, purely cosmetic (cooldown sweep) — the server is the real gate. */
+  private skillLastUsedAt = new Map<string, number>();
 
   // The zone we render — only mobs/players sharing it are shown. Same
   // coordinate space is reused across zones, so visibility (not position)
@@ -400,12 +415,12 @@ class WorldScene extends Phaser.Scene {
       .setStrokeStyle(2, 0x3a3a55)
       .setDepth(0);
 
-    // --- Portrait panel: connection status + HP bar ---
+    // --- Portrait panel: connection status + HP/mana/XP bars ---
     const portraitPanel = this.add.graphics().setDepth(1);
     portraitPanel.fillStyle(0x0a0a12, 0.75);
-    portraitPanel.fillRoundedRect(8, 8, 210, 62, 6);
+    portraitPanel.fillRoundedRect(8, 8, 210, 84, 6);
     portraitPanel.lineStyle(1, 0x4b5563, 1);
-    portraitPanel.strokeRoundedRect(8, 8, 210, 62, 6);
+    portraitPanel.strokeRoundedRect(8, 8, 210, 84, 6);
 
     this.statusText = this.add.text(18, 14, "connecting...", {
       fontFamily: "monospace",
@@ -425,8 +440,16 @@ class WorldScene extends Phaser.Scene {
     }).setOrigin(0.5).setDepth(3)
       .setStroke("#000000", 3);
 
-    // --- Level + XP bar, same portrait panel, below the HP bar ---
-    this.levelText = this.add.text(18, 58, "Lv 1", {
+    // --- Mana bar, same portrait panel, below the HP bar ---
+    const manaBarBg = this.add.rectangle(18, 54, 194, 8, 0x1f2937).setOrigin(0, 0).setDepth(2);
+    this.manaBarFill = this.add.rectangle(18, 54, 194, 8, 0x60a5fa).setOrigin(0, 0).setDepth(2);
+    manaBarBg.setStrokeStyle(1, 0x000000);
+    this.manaText = this.add.text(18 + 97, 54 + 4, "", {
+      fontFamily: "monospace", fontSize: "9px", color: "#dbeafe", fontStyle: "bold",
+    }).setOrigin(0.5).setDepth(3).setStroke("#000000", 2);
+
+    // --- Level + XP bar, same portrait panel, below the mana bar ---
+    this.levelText = this.add.text(18, 76, "Lv 1", {
       fontFamily: "monospace",
       fontSize: "10px",
       color: "#a5b4fc",
@@ -434,9 +457,9 @@ class WorldScene extends Phaser.Scene {
     }).setOrigin(0, 0.5).setDepth(2);
 
     const xpBarX = 54;
-    const xpBarY = 54;
+    const xpBarY = 72;
     const xpBarBg = this.add.rectangle(xpBarX, xpBarY, XP_BAR_WIDTH, 8, 0x1f2937).setOrigin(0, 0).setDepth(2);
-    this.xpBarFill = this.add.rectangle(xpBarX, xpBarY, XP_BAR_WIDTH, 8, 0x60a5fa).setOrigin(0, 0).setDepth(2);
+    this.xpBarFill = this.add.rectangle(xpBarX, xpBarY, XP_BAR_WIDTH, 8, 0x818cf8).setOrigin(0, 0).setDepth(2);
     xpBarBg.setStrokeStyle(1, 0x000000);
 
     // Sum of currently-equipped gear power (weapon attack bonus + armor HP
@@ -466,10 +489,10 @@ class WorldScene extends Phaser.Scene {
     // Only one of the three is ever open — clicking a toggle (or its key)
     // opens that one and closes whichever else was open, so their panels
     // never need to coexist on screen.
-    const panelSlotY = 106;
+    const panelSlotY = 128;
     const panelSlotWidth = 220;
 
-    this.bagToggleBounds = { x: 8, y: 78, w: 66, h: 24 };
+    this.bagToggleBounds = { x: 8, y: 100, w: 66, h: 24 };
     const bagToggle = this.add.rectangle(
       this.bagToggleBounds.x, this.bagToggleBounds.y, this.bagToggleBounds.w, this.bagToggleBounds.h, 0x0a0a12, 0.85,
     ).setOrigin(0, 0).setStrokeStyle(1, 0x4b5563).setDepth(1).setInteractive({ useHandCursor: true });
@@ -478,7 +501,7 @@ class WorldScene extends Phaser.Scene {
       { fontFamily: "monospace", fontSize: "10px", color: "#e5e7eb" },
     ).setOrigin(0.5).setDepth(2);
 
-    this.shopToggleBounds = { x: 78, y: 78, w: 66, h: 24 };
+    this.shopToggleBounds = { x: 78, y: 100, w: 66, h: 24 };
     const shopToggle = this.add.rectangle(
       this.shopToggleBounds.x, this.shopToggleBounds.y, this.shopToggleBounds.w, this.shopToggleBounds.h, 0x0a0a12, 0.85,
     ).setOrigin(0, 0).setStrokeStyle(1, 0x4b5563).setDepth(1).setInteractive({ useHandCursor: true });
@@ -487,7 +510,7 @@ class WorldScene extends Phaser.Scene {
       { fontFamily: "monospace", fontSize: "10px", color: "#e5e7eb" },
     ).setOrigin(0.5).setDepth(2);
 
-    this.craftToggleBounds = { x: 148, y: 78, w: 74, h: 24 };
+    this.craftToggleBounds = { x: 148, y: 100, w: 74, h: 24 };
     const craftToggle = this.add.rectangle(
       this.craftToggleBounds.x, this.craftToggleBounds.y, this.craftToggleBounds.w, this.craftToggleBounds.h, 0x0a0a12, 0.85,
     ).setOrigin(0, 0).setStrokeStyle(1, 0x4b5563).setDepth(1).setInteractive({ useHandCursor: true });
@@ -676,6 +699,38 @@ class WorldScene extends Phaser.Scene {
     settingsToggle.on("pointerdown", toggleSettings);
     this.input.keyboard!.on("keydown-ESC", toggleSettings);
 
+    // --- Skill bar: bottom-center, keys 1/2/3 or click ---
+    const skillButtonW = 92;
+    const skillButtonH = 44;
+    const skillGap = 8;
+    const skillBarWidth = SKILLS.length * skillButtonW + (SKILLS.length - 1) * skillGap;
+    const skillBarStartX = (ARENA_WIDTH - skillBarWidth) / 2;
+    const skillBarY = ARENA_HEIGHT - skillButtonH - 12;
+
+    SKILLS.forEach((skill, i) => {
+      const bx = skillBarStartX + i * (skillButtonW + skillGap);
+      const bounds = { x: bx, y: skillBarY, w: skillButtonW, h: skillButtonH };
+
+      const bg = this.add.rectangle(bx, skillBarY, skillButtonW, skillButtonH, 0x0a0a12, 0.85)
+        .setOrigin(0, 0).setStrokeStyle(1, 0x4b5563).setDepth(10).setInteractive({ useHandCursor: true });
+      this.add.text(bx + 6, skillBarY + 4, `[${i + 1}] ${skill.name}`, {
+        fontFamily: "monospace", fontSize: "10px", color: "#e5e7eb", fontStyle: "bold",
+      }).setDepth(12);
+      this.add.text(bx + 6, skillBarY + skillButtonH - 15, `${skill.manaCost} mana`, {
+        fontFamily: "monospace", fontSize: "9px", color: "#93c5fd",
+      }).setDepth(12);
+
+      // Cooldown sweep: a dark overlay that shrinks from full height to 0 as
+      // the (client-predicted) cooldown elapses — purely cosmetic feedback,
+      // the server independently enforces the real cooldown/mana gates.
+      const cooldownOverlay = this.add.rectangle(bx, skillBarY, skillButtonW, skillButtonH, 0x000000, 0.6)
+        .setOrigin(0, 0).setDepth(11).setVisible(false);
+      this.skillButtons.push({ bounds, cooldownOverlay });
+
+      bg.on("pointerdown", () => this.tryUseSkill(skill.id));
+      this.input.keyboard!.on(`keydown-${["ONE", "TWO", "THREE"][i]}`, () => this.tryUseSkill(skill.id));
+    });
+
     // --- "You Died" overlay: full-screen dim + centered text, hidden until local death ---
     this.deathOverlayBg = this.add.rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH, ARENA_HEIGHT, 0x000000, 0.6)
       .setVisible(false)
@@ -755,6 +810,21 @@ class WorldScene extends Phaser.Scene {
   }
 
   /**
+   * Attack skills reuse whatever mob is currently targeted (no separate aim
+   * step); heal needs no target. The server is the real authority on mana,
+   * cooldown, and range — this only starts the cosmetic cooldown sweep and
+   * skips the obviously-invalid case of an attack skill with no target.
+   */
+  private tryUseSkill(skillId: string) {
+    const skill = SKILLS.find((s) => s.id === skillId);
+    if (!skill) { return; }
+    if (skill.kind === "attack" && !this.attackTargetId) { return; }
+
+    this.room?.send("useSkill", { skillId, targetMobId: this.attackTargetId });
+    this.skillLastUsedAt.set(skillId, this.time.now);
+  }
+
+  /**
    * Auto-attack continuation: after a kill, look for the nearest living mob
    * in our own zone within AUTO_ATTACK_LEASH_RADIUS of (x, y) and keep
    * fighting, instead of going idle and waiting for a re-click.
@@ -818,6 +888,12 @@ class WorldScene extends Phaser.Scene {
     this.levelText.setText(`Lv ${level}`);
     const ratio = Phaser.Math.Clamp(xp / xpToNextLevel(level), 0, 1);
     this.xpBarFill.width = XP_BAR_WIDTH * ratio;
+  }
+
+  private updateManaBar(mana: number, maxMana: number) {
+    const ratio = Phaser.Math.Clamp(mana / maxMana, 0, 1);
+    this.manaBarFill.width = 194 * ratio;
+    this.manaText.setText(`${Math.floor(mana)}/${maxMana}`);
   }
 
   private updatePowerText(equippedWeapon: string, equippedArmor: string) {
@@ -957,7 +1033,7 @@ class WorldScene extends Phaser.Scene {
 
       $(room.state).players.onAdd((player, sessionId) => {
         const isMe = sessionId === room.sessionId;
-        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp, zone: player.zone, equippedWeapon: player.equippedWeapon, equippedArmor: player.equippedArmor });
+        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, mana: player.mana, maxMana: player.maxMana, level: player.level, xp: player.xp, zone: player.zone, equippedWeapon: player.equippedWeapon, equippedArmor: player.equippedArmor });
 
         const avatar = this.add.sprite(player.x, player.y, "player")
           .setDisplaySize(40, 56)
@@ -994,6 +1070,7 @@ class WorldScene extends Phaser.Scene {
           const prevLevel = view?.level ?? player.level;
           if (view) {
             view.x = player.x; view.y = player.y; view.hp = player.hp; view.maxHp = player.maxHp;
+            view.mana = player.mana; view.maxMana = player.maxMana;
             view.level = player.level; view.xp = player.xp; view.zone = player.zone;
             view.equippedWeapon = player.equippedWeapon; view.equippedArmor = player.equippedArmor;
           }
@@ -1020,6 +1097,7 @@ class WorldScene extends Phaser.Scene {
           if (isMe) {
             this.hpText.setText(alive ? `${player.hp}/${player.maxHp}` : "respawning...");
             this.updateHpBar(player.hp, player.maxHp);
+            this.updateManaBar(player.mana, player.maxMana);
             this.updateXpBar(player.level, player.xp);
             this.updatePowerText(player.equippedWeapon, player.equippedArmor);
             if (player.level > prevLevel) { this.queueToast(`Level up! Lv ${player.level}`, "#a5b4fc"); }
@@ -1041,6 +1119,7 @@ class WorldScene extends Phaser.Scene {
           this.myZone = player.zone;
           this.hpText.setText(`${player.hp}/${player.maxHp}`);
           this.updateHpBar(player.hp, player.maxHp);
+          this.updateManaBar(player.mana, player.maxMana);
           this.updateXpBar(player.level, player.xp);
           this.updatePowerText(player.equippedWeapon, player.equippedArmor);
           this.questText.setText(player.questComplete
@@ -1110,6 +1189,14 @@ class WorldScene extends Phaser.Scene {
 
   update() {
     if (!this.myInput) return;
+
+    SKILLS.forEach((skill, i) => {
+      const button = this.skillButtons[i];
+      const lastUsed = this.skillLastUsedAt.get(skill.id);
+      if (lastUsed === undefined) { button.cooldownOverlay.setVisible(false); return; }
+      const ratio = Phaser.Math.Clamp((this.time.now - lastUsed) / skill.cooldownMs, 0, 1);
+      button.cooldownOverlay.setVisible(ratio < 1).setSize(button.bounds.w, button.bounds.h * (1 - ratio));
+    });
 
     const me = this.mySessionId && this.players.get(this.mySessionId);
     if (me && me.hp <= 0) {

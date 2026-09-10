@@ -4,6 +4,7 @@ import { MyRoomState, Player, Mob, MoveInput } from "./schema/MyRoomState.js";
 import { rollDrop } from "../shared/items.js";
 import { SHOP_CATALOG, SHOP_CURRENCY_ITEM, RECIPES, CONSUMABLES } from "../shared/economy.js";
 import { GEAR_CATALOG } from "../shared/gear.js";
+import { SKILLS } from "../shared/skills.js";
 import { MOB_TYPES } from "../shared/mobTypes.js";
 import { stepEntity, moveToward } from "../shared/movement.js";
 import {
@@ -12,6 +13,7 @@ import {
   PLAYER_MAX_HP, MOB_DAMAGE_TO_PLAYER, MOB_ATTACK_INTERVAL_MS, PLAYER_RESPAWN_MS,
   QUEST_KILL_TARGET, QUEST_REWARD_ITEM, QUEST_REWARD_QTY,
   LEVEL_UP_MAX_HP_BONUS, xpToNextLevel,
+  PLAYER_MAX_MANA, LEVEL_UP_MAX_MANA_BONUS, MANA_REGEN_PER_SEC,
   MOB_NOTICE_RANGE, MOB_WANDER_SPEED, MOB_CHASE_SPEED, MOB_WANDER_RADIUS,
   MOB_WANDER_PAUSE_MIN_MS, MOB_WANDER_PAUSE_MAX_MS, MOB_WANDER_ARRIVE_DIST,
   ZONE_START, ZONE_FOREST, ZONE_TRANSITION_INSET,
@@ -57,6 +59,9 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
   /** Per-player attack cooldown, server-side wall clock — not part of state. */
   private lastAttackAt = new Map<string, number>();
 
+  /** Per-player-per-skill cooldown, keyed "sessionId:skillId" — not part of state. */
+  private lastSkillAt = new Map<string, number>();
+
   /** Per-mob attack cooldown against players, server-side wall clock. */
   private lastMobAttackAt = new Map<string, number>();
 
@@ -92,6 +97,9 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     }),
     unequip: validate(z.object({ slot: z.enum(["weapon", "armor"]) }), function (this: MyRoom, client: Client, message: { slot: "weapon" | "armor" }) {
       this.handleUnequip(client, message.slot);
+    }),
+    useSkill: validate(z.object({ skillId: z.string(), targetMobId: z.string().optional() }), function (this: MyRoom, client: Client, message: { skillId: string; targetMobId?: string }) {
+      this.handleUseSkill(client, message.skillId, message.targetMobId);
     }),
   };
 
@@ -219,35 +227,80 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
     const weaponPower = player.equippedWeapon ? (GEAR_CATALOG[player.equippedWeapon]?.power ?? 0) : 0;
     mob.hp = Math.max(0, mob.hp - (MOB_ATTACK_DAMAGE + weaponPower));
 
-    if (mob.hp === 0) {
-      mob.alive = false;
-      this.mobAggroTarget.delete(mobId); // dead mobs don't keep chasing on respawn
-      this.clock.setTimeout(() => {
-        const spawn = this.mobSpawns.get(mobId);
-        if (spawn) { mob.x = spawn.x; mob.y = spawn.y; }
-        this.mobWanderTarget.delete(mobId);
-        this.mobNextWanderAt.delete(mobId);
-        mob.hp = mob.maxHp;
-        mob.alive = true;
-      }, MOB_RESPAWN_MS);
+    if (mob.hp === 0) { this.killMob(mobId, mob, player); }
+  }
 
-      const drop = rollDrop();
-      player.inventory.set(drop.id, (player.inventory.get(drop.id) ?? 0) + 1);
+  /**
+   * Shared death handling for any source of lethal damage (basic attack,
+   * offensive skills): schedules respawn, rolls loot, and updates
+   * bestiary/quest/XP for the player who landed the kill.
+   */
+  private killMob(mobId: string, mob: Mob, player: Player) {
+    mob.alive = false;
+    this.mobAggroTarget.delete(mobId); // dead mobs don't keep chasing on respawn
+    this.clock.setTimeout(() => {
+      const spawn = this.mobSpawns.get(mobId);
+      if (spawn) { mob.x = spawn.x; mob.y = spawn.y; }
+      this.mobWanderTarget.delete(mobId);
+      this.mobNextWanderAt.delete(mobId);
+      mob.hp = mob.maxHp;
+      mob.alive = true;
+    }, MOB_RESPAWN_MS);
 
-      if (!player.bestiary.get(mob.type)) {
-        player.bestiary.set(mob.type, true);
-      }
+    const drop = rollDrop();
+    player.inventory.set(drop.id, (player.inventory.get(drop.id) ?? 0) + 1);
 
-      if (!player.questComplete) {
-        player.questKills += 1;
-        if (player.questKills >= QUEST_KILL_TARGET) {
-          player.questComplete = true;
-          player.inventory.set(QUEST_REWARD_ITEM, (player.inventory.get(QUEST_REWARD_ITEM) ?? 0) + QUEST_REWARD_QTY);
-        }
-      }
-
-      this.awardXp(player, mob.maxHp);
+    if (!player.bestiary.get(mob.type)) {
+      player.bestiary.set(mob.type, true);
     }
+
+    if (!player.questComplete) {
+      player.questKills += 1;
+      if (player.questKills >= QUEST_KILL_TARGET) {
+        player.questComplete = true;
+        player.inventory.set(QUEST_REWARD_ITEM, (player.inventory.get(QUEST_REWARD_ITEM) ?? 0) + QUEST_REWARD_QTY);
+      }
+    }
+
+    this.awardXp(player, mob.maxHp);
+  }
+
+  /**
+   * `power_strike`/`fireball` deal bonus damage (on top of the same base +
+   * weapon power as a basic attack) at their own range; `heal` restores the
+   * caster's own hp. Same cooldown/mana/range guards regardless of kind.
+   */
+  private handleUseSkill(client: Client, skillId: string, targetMobId?: string) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || player.hp <= 0) { return; }
+
+    const skill = SKILLS[skillId];
+    if (!skill) { return; }
+
+    const cooldownKey = `${client.sessionId}:${skillId}`;
+    const now = this.clock.currentTime;
+    if (now - (this.lastSkillAt.get(cooldownKey) ?? 0) < skill.cooldownMs) { return; }
+    if (player.mana < skill.manaCost) { return; }
+
+    if (skill.kind === "heal") {
+      if (player.hp >= player.maxHp) { return; }
+      this.lastSkillAt.set(cooldownKey, now);
+      player.mana -= skill.manaCost;
+      player.hp = Math.min(player.maxHp, player.hp + skill.power);
+      return;
+    }
+
+    // kind === "attack"
+    const mob = targetMobId ? this.state.mobs.get(targetMobId) : undefined;
+    if (!mob || !mob.alive || player.zone !== mob.zone) { return; }
+    if (Math.hypot(mob.x - player.x, mob.y - player.y) > (skill.range ?? MOB_ATTACK_RANGE)) { return; }
+
+    this.lastSkillAt.set(cooldownKey, now);
+    player.mana -= skill.manaCost;
+    const weaponPower = player.equippedWeapon ? (GEAR_CATALOG[player.equippedWeapon]?.power ?? 0) : 0;
+    mob.hp = Math.max(0, mob.hp - (MOB_ATTACK_DAMAGE + weaponPower + skill.power));
+
+    if (mob.hp === 0) { this.killMob(targetMobId!, mob, player); }
   }
 
   /**
@@ -263,6 +316,8 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       player.level += 1;
       player.maxHp += LEVEL_UP_MAX_HP_BONUS;
       player.hp = player.maxHp; // full heal on level-up
+      player.maxMana += LEVEL_UP_MAX_MANA_BONUS;
+      player.mana = player.maxMana;
     }
   }
 
@@ -279,6 +334,8 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       zone: ZONE_START,
       hp: PLAYER_MAX_HP,
       maxHp: PLAYER_MAX_HP,
+      mana: PLAYER_MAX_MANA,
+      maxMana: PLAYER_MAX_MANA,
       level: 1,
       xp: 0,
       questKills: 0,
@@ -315,6 +372,7 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       }
 
       this.maybeTransitionZone(player);
+      player.mana = Math.min(player.maxMana, player.mana + MANA_REGEN_PER_SEC * ctx.dt);
     }
 
     this.stepMobAI(ctx.dt);

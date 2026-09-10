@@ -121,4 +121,68 @@ describe("testing your Colyseus app", () => {
     await room.waitForNextMessage();
     assert.strictEqual(player.equippedWeapon, "", "non-gear items are never equippable");
   });
+
+  it("power_strike deals bonus damage and spends mana, respecting its own cooldown", async () => {
+    const room = await colyseus.createRoom<MyRoomState>("my_room", {});
+    const client1 = await colyseus.connectTo(room);
+
+    const player = room.state.players.get(client1.sessionId);
+    // mob-4 is a wolf (45 max hp) — tough enough that the hit doesn't clamp
+    // at 0 and mask the actual damage dealt, unlike the 20-hp rat (mob-0).
+    const mob = room.state.mobs.get("mob-4");
+    player.x = mob.x;
+    player.y = mob.y;
+    const startMana = player.mana;
+    const startHp = mob.hp;
+
+    client1.send("useSkill", { skillId: "power_strike", targetMobId: "mob-4" });
+    await room.waitForNextMessage();
+
+    // Base MOB_ATTACK_DAMAGE (10) + power_strike's power (15), no weapon equipped.
+    assert.strictEqual(startHp - mob.hp, 25);
+    assert.strictEqual(player.mana, startMana - 8);
+
+    // Cooldown blocks an immediate second cast even with enough mana left.
+    const hpAfterFirst = mob.hp;
+    client1.send("useSkill", { skillId: "power_strike", targetMobId: "mob-4" });
+    await room.waitForNextMessage();
+    assert.strictEqual(mob.hp, hpAfterFirst, "still on cooldown — second cast is a no-op");
+  });
+
+  it("heal is a no-op at full hp (and doesn't start its cooldown)", async () => {
+    const room = await colyseus.createRoom<MyRoomState>("my_room", {});
+    const client1 = await colyseus.connectTo(room);
+
+    const player = room.state.players.get(client1.sessionId);
+
+    client1.send("useSkill", { skillId: "heal" });
+    await room.waitForNextMessage();
+    assert.strictEqual(player.mana, 50, "heal at full hp spends no mana");
+  });
+
+  it("heal restores its power and spends mana", async () => {
+    const room = await colyseus.createRoom<MyRoomState>("my_room", {});
+    const client1 = await colyseus.connectTo(room);
+
+    const player = room.state.players.get(client1.sessionId);
+    player.hp = 50;
+
+    client1.send("useSkill", { skillId: "heal" });
+    await room.waitForNextMessage();
+    assert.strictEqual(player.hp, 80, "heal restores its power (30)");
+    assert.strictEqual(player.mana, 35, "heal's mana cost (15) is spent");
+  });
+
+  it("heal is rejected without enough mana", async () => {
+    const room = await colyseus.createRoom<MyRoomState>("my_room", {});
+    const client1 = await colyseus.connectTo(room);
+
+    const player = room.state.players.get(client1.sessionId);
+    player.hp = 50;
+    player.mana = 0;
+
+    client1.send("useSkill", { skillId: "heal" });
+    await room.waitForNextMessage();
+    assert.strictEqual(player.hp, 50, "no mana — heal is rejected");
+  });
 });

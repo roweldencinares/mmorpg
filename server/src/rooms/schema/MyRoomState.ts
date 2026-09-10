@@ -25,6 +25,8 @@ export const Player = schema({
   zone: t.string(),
   hp: t.number(),
   maxHp: t.number(),
+  mana: t.number(),
+  maxMana: t.number(),
   level: t.number(),
   xp: t.number(),
   /** itemId -> quantity */

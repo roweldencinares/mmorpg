@@ -69,6 +69,14 @@ export const XP_PER_LEVEL = 50;
 /** Max HP granted, and fully healed to, on every level gained. */
 export const LEVEL_UP_MAX_HP_BONUS = 10;
 
+export const PLAYER_MAX_MANA = 50;
+
+/** Max mana granted, and fully restored to, on every level gained. */
+export const LEVEL_UP_MAX_MANA_BONUS = 5;
+
+/** Passive mana regen, applied continuously while alive. */
+export const MANA_REGEN_PER_SEC = 2;
+
 /** XP required to advance from `level` to `level + 1`. */
 export function xpToNextLevel(level: number): number {
   return level * XP_PER_LEVEL;
