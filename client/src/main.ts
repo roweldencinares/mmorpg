@@ -1,17 +1,6 @@
 import Phaser from "phaser";
 import { Client, getStateCallbacks, type InputHandle } from "@colyseus/sdk";
 
-// Pixel-art sprites/icons sourced from the Reldens project (MIT) — see
-// assets/reldens/NOTICE.md. Replace the old scaled-down anime portrait
-// (assets/hero.png, no longer used) with art actually made for top-down play.
-import playerBaseUrl from "./assets/reldens/player-base.png";
-import monsterGolemUrl from "./assets/reldens/monster-golem2.png";
-import monsterTreantUrl from "./assets/reldens/monster-treant.png";
-import iconCoinUrl from "./assets/reldens/coins.png";
-import iconPotionUrl from "./assets/reldens/heal-potion-20.png";
-import iconAxeUrl from "./assets/reldens/axe.png";
-import iconShieldUrl from "./assets/reldens/wooden-shield.png";
-
 const ARENA_WIDTH = 800;
 const ARENA_HEIGHT = 600;
 const SERVER_URL = "ws://localhost:2567";
@@ -40,14 +29,14 @@ const ITEM_COLORS: Record<string, number> = {
   leather_armor: 0xa16207,
 };
 
-// Real pixel-art icons (from Reldens, see assets/reldens/NOTICE.md) for items
-// where a close-enough match exists; everything else falls back to a plain
-// ITEM_COLORS swatch rather than force a mismatched icon onto it.
-const ITEM_ICON: Partial<Record<string, { texture: string; frame: number }>> = {
-  gold_coin: { texture: "icon-coin", frame: 0 },
-  health_potion: { texture: "icon-potion", frame: 0 },
-  iron_dagger: { texture: "icon-axe", frame: 0 },
-  leather_armor: { texture: "icon-shield", frame: 0 },
+// Small drawn icons (built at runtime in buildProceduralTextures(), no image
+// files) for items where a simple shape reads clearly; everything else falls
+// back to a plain ITEM_COLORS swatch rather than force a bad icon onto it.
+const ITEM_ICON: Partial<Record<string, string>> = {
+  gold_coin: "icon-coin",
+  health_potion: "icon-potion",
+  iron_dagger: "icon-dagger",
+  leather_armor: "icon-armor",
 };
 
 // Mirrors server's shared/economy.ts — display data only, the server is the
@@ -76,14 +65,14 @@ const AUTO_ATTACK_LEASH_RADIUS = 200;
 
 // Mirrors server's shared/mobTypes.ts — display names/art only. Only two
 // distinct monster sprites are available (golem, treant) so slime/wolf borrow
-// them as reskins rather than an exact match; rat reuses the player charset,
-// tinted, since there's no rodent sprite in the set we copied from Reldens.
-const MOB_TYPE_INFO: Record<string, { name: string; texture: string; frame: number; tint: number }> = {
-  rat: { name: "Rat", texture: "player", frame: 1, tint: 0x9ca3af },
-  slime: { name: "Slime", texture: "monster-treant", frame: 1, tint: 0xffffff },
-  wolf: { name: "Wolf", texture: "monster-golem", frame: 1, tint: 0xffffff },
+// each type gets its own hand-drawn silhouette (built at runtime in
+// buildProceduralTextures(), no image files) with color already baked in —
+// no per-type tint needed, "tint" here is only the flash used while targeted.
+const MOB_TYPE_INFO: Record<string, { name: string; texture: string }> = {
+  rat: { name: "Rat", texture: "mob-rat" },
+  slime: { name: "Slime", texture: "mob-slime" },
+  wolf: { name: "Wolf", texture: "mob-wolf" },
 };
-const DEFAULT_MOB_COLOR = 0xff4444;
 const TARGETED_MOB_COLOR = 0xffff88;
 
 // Mirrors server's QUEST_KILL_TARGET (shared/constants.ts).
@@ -203,22 +192,92 @@ class WorldScene extends Phaser.Scene {
   private deathOverlayTitle!: Phaser.GameObjects.Text;
   private deathOverlaySubtitle!: Phaser.GameObjects.Text;
 
-  preload() {
-    // RPG-Maker-style charsets: 3 walk-cycle frames x 4 facings (down/left/right/up).
-    // We don't animate yet — frame 1 of each row is the "standing still" pose.
-    this.load.spritesheet("player", playerBaseUrl, { frameWidth: 52, frameHeight: 71 });
-    this.load.spritesheet("monster-golem", monsterGolemUrl, { frameWidth: 47, frameHeight: 50 });
-    this.load.spritesheet("monster-treant", monsterTreantUrl, { frameWidth: 47, frameHeight: 50 });
+  /**
+   * Every character/monster/item texture is drawn here with Phaser's Graphics
+   * API and baked into a texture with generateTexture() — plain shapes, not
+   * loaded image files, so there's no external art and nothing to attribute.
+   */
+  private buildProceduralTextures() {
+    const g = this.make.graphics({ x: 0, y: 0 }, false);
+    const bake = (key: string, width: number, height: number, draw: () => void) => {
+      g.clear();
+      draw();
+      g.generateTexture(key, width, height);
+    };
 
-    // Item icons: 3-frame idle-bob strips, we only need a single static frame.
-    this.load.spritesheet("icon-coin", iconCoinUrl, { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet("icon-potion", iconPotionUrl, { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet("icon-axe", iconAxeUrl, { frameWidth: 32, frameHeight: 32 });
-    this.load.spritesheet("icon-shield", iconShieldUrl, { frameWidth: 32, frameHeight: 32 });
+    // Player: drawn near-white so setTint() can recolor it per-player (see
+    // isMe/other tinting below) without redrawing the shape.
+    bake("player", 40, 56, () => {
+      g.fillStyle(0xf3f4f6, 1);
+      g.fillCircle(20, 14, 10);
+      g.fillRoundedRect(7, 23, 26, 31, 7);
+    });
+
+    bake("mob-rat", 36, 50, () => {
+      g.fillStyle(0x9ca3af, 1);
+      g.fillTriangle(9, 17, 13, 6, 18, 17);
+      g.fillTriangle(18, 17, 23, 6, 27, 17);
+      g.fillEllipse(18, 32, 22, 26);
+      g.fillRect(27, 36, 8, 3);
+    });
+
+    bake("mob-slime", 36, 50, () => {
+      g.fillStyle(0x38bdf8, 1);
+      g.fillRoundedRect(4, 18, 28, 28, 14);
+      g.fillStyle(0x0c4a6e, 1);
+      g.fillCircle(14, 30, 2);
+      g.fillCircle(22, 30, 2);
+    });
+
+    bake("mob-wolf", 36, 50, () => {
+      g.fillStyle(0x78350f, 1);
+      g.fillTriangle(5, 18, 12, 1, 18, 18);
+      g.fillTriangle(18, 18, 24, 1, 31, 18);
+      g.fillEllipse(18, 34, 27, 30);
+      g.fillTriangle(11, 40, 18, 49, 25, 40);
+    });
+
+    bake("icon-coin", 22, 22, () => {
+      g.fillStyle(0xfbbf24, 1);
+      g.fillCircle(11, 11, 9);
+      g.lineStyle(2, 0xca8a04, 1);
+      g.strokeCircle(11, 11, 8);
+    });
+
+    bake("icon-potion", 22, 22, () => {
+      g.fillStyle(0x7dd3fc, 1);
+      g.fillRect(9, 2, 4, 5);
+      g.fillStyle(0xf87171, 1);
+      g.fillRoundedRect(5, 7, 12, 13, 4);
+      g.lineStyle(1, 0x991b1b, 1);
+      g.strokeRoundedRect(5, 7, 12, 13, 4);
+    });
+
+    bake("icon-dagger", 22, 22, () => {
+      g.fillStyle(0xd1d5db, 1);
+      g.fillTriangle(11, 1, 8, 13, 14, 13);
+      g.fillStyle(0x8b5a2b, 1);
+      g.fillRect(7, 15, 8, 3);
+      g.fillRect(9, 15, 4, 6);
+    });
+
+    bake("icon-armor", 22, 22, () => {
+      g.fillStyle(0xa16207, 1);
+      g.fillRoundedRect(4, 3, 14, 16, 5);
+      g.lineStyle(1, 0x78350f, 1);
+      g.strokeRoundedRect(4, 3, 14, 16, 5);
+      g.beginPath();
+      g.moveTo(11, 3);
+      g.lineTo(11, 19);
+      g.strokePath();
+    });
+
+    g.destroy();
   }
 
   create() {
     this.cameras.main.setBackgroundColor("#101018");
+    this.buildProceduralTextures();
 
     this.backgroundGraphics = this.add.graphics().setDepth(0);
     this.drawBackground();
@@ -334,9 +393,9 @@ class WorldScene extends Phaser.Scene {
 
     ITEM_ORDER.forEach((itemId, i) => {
       const rowY = this.bagPanelBounds.y + 5 + i * bagRowHeight;
-      const iconInfo = ITEM_ICON[itemId];
-      const icon: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Sprite = iconInfo
-        ? this.add.sprite(this.bagPanelBounds.x + 19, rowY + 11, iconInfo.texture, iconInfo.frame)
+      const iconTexture = ITEM_ICON[itemId];
+      const icon: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Sprite = iconTexture
+        ? this.add.sprite(this.bagPanelBounds.x + 19, rowY + 11, iconTexture)
           .setDisplaySize(22, 22).setDepth(2).setVisible(false)
         : this.add.rectangle(this.bagPanelBounds.x + 8, rowY, 22, 22, ITEM_COLORS[itemId])
           .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false);
@@ -400,9 +459,9 @@ class WorldScene extends Phaser.Scene {
 
     SHOP_CATALOG.forEach((entry, i) => {
       const rowY = this.shopPanelBounds.y + shopHeaderHeight + 5 + i * shopRowHeight;
-      const shopIconInfo = ITEM_ICON[entry.itemId];
-      const icon = shopIconInfo
-        ? this.add.sprite(this.shopPanelBounds.x + 19, rowY + 11, shopIconInfo.texture, shopIconInfo.frame)
+      const shopIconTexture = ITEM_ICON[entry.itemId];
+      const icon = shopIconTexture
+        ? this.add.sprite(this.shopPanelBounds.x + 19, rowY + 11, shopIconTexture)
           .setDisplaySize(22, 22).setDepth(2).setVisible(false)
         : this.add.rectangle(this.shopPanelBounds.x + 8, rowY, 22, 22, ITEM_COLORS[entry.itemId])
           .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false);
@@ -576,9 +635,7 @@ class WorldScene extends Phaser.Scene {
 
   private clearAttackTarget() {
     if (this.attackTargetId) {
-      const mob = this.mobs.get(this.attackTargetId);
-      const baseColor = mob ? (MOB_TYPE_INFO[mob.type]?.tint ?? DEFAULT_MOB_COLOR) : DEFAULT_MOB_COLOR;
-      this.mobSprites.get(this.attackTargetId)?.setTint(baseColor);
+      this.mobSprites.get(this.attackTargetId)?.setTint(0xffffff);
     }
     this.attackTargetId = undefined;
   }
@@ -729,9 +786,8 @@ class WorldScene extends Phaser.Scene {
         this.mobs.set(mobId, { x: mob.x, y: mob.y, hp: mob.hp, maxHp: mob.maxHp, alive: mob.alive, type: mob.type, zone: mob.zone });
         const info = MOB_TYPE_INFO[mob.type];
 
-        const sprite = this.add.sprite(mob.x, mob.y, info?.texture ?? "player", info?.frame ?? 1)
+        const sprite = this.add.sprite(mob.x, mob.y, info?.texture ?? "mob-rat")
           .setDisplaySize(36, 50)
-          .setTint(info?.tint ?? DEFAULT_MOB_COLOR)
           .setInteractive({ useHandCursor: true });
         this.mobSprites.set(mobId, sprite);
 
@@ -767,7 +823,7 @@ class WorldScene extends Phaser.Scene {
           const dmg = prevHp - mob.hp;
           if (dmg > 0) { this.spawnFloatingText(mob.x, mob.y - 20, `-${dmg}`, "#ffffff"); }
 
-          const tint = this.attackTargetId === mobId ? TARGETED_MOB_COLOR : (info?.tint ?? DEFAULT_MOB_COLOR);
+          const tint = this.attackTargetId === mobId ? TARGETED_MOB_COLOR : 0xffffff;
           sprite.setPosition(mob.x, mob.y).setTint(tint);
           nameLabel.setPosition(mob.x, mob.y - 46);
           hpBg.setPosition(mob.x, mob.y - 34);
@@ -783,7 +839,7 @@ class WorldScene extends Phaser.Scene {
         const isMe = sessionId === room.sessionId;
         this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp, zone: player.zone, equippedWeapon: player.equippedWeapon, equippedArmor: player.equippedArmor });
 
-        const avatar = this.add.sprite(player.x, player.y, "player", 1)
+        const avatar = this.add.sprite(player.x, player.y, "player")
           .setDisplaySize(40, 56)
           .setTint(isMe ? 0xffffff : 0xffb380);
         this.sprites.set(sessionId, avatar);
