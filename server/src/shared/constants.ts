@@ -23,6 +23,27 @@ export const MOB_ATTACK_COOLDOWN_MS = 600;
 /** Time a dead mob stays down before respawning at full health. */
 export const MOB_RESPAWN_MS = 5000;
 
+/** How far a mob will notice an approaching player and start chasing — wider
+ *  than attack range so it visibly closes the gap before swinging. */
+export const MOB_NOTICE_RANGE = MOB_ATTACK_RANGE * 2.5;
+
+/** Units per second while idly wandering — slower than a chasing mob. */
+export const MOB_WANDER_SPEED = 50;
+
+/** Units per second while chasing an aggro'd player. */
+export const MOB_CHASE_SPEED = 90;
+
+/** A wandering mob never picks a point further than this from its own spawn. */
+export const MOB_WANDER_RADIUS = 80;
+
+/** Once a wander target is reached, the mob pauses this long (randomized
+ *  between min/max) before picking its next one. */
+export const MOB_WANDER_PAUSE_MIN_MS = 1500;
+export const MOB_WANDER_PAUSE_MAX_MS = 4000;
+
+/** Close enough to a wander target to consider it "reached". */
+export const MOB_WANDER_ARRIVE_DIST = 4;
+
 export const PLAYER_MAX_HP = 100;
 
 /** Damage a mob deals to a player standing in its range, once per interval. */
