@@ -232,13 +232,17 @@ class WorldScene extends Phaser.Scene {
     // "walk" frames swap which leg/arm pair is forward, for a scissor stride
     // played back-and-forth in update() while the entity is actually moving.
     const playerBody = (legPhase: 0 | 1 | 2) => {
-      const legOffset = legPhase === 0 ? 0 : legPhase === 1 ? 2 : -2;
+      // Legs/arms keep their real size and just shift position (stride width
+      // + a counter-swing arm dip) instead of stretching/squashing — the
+      // previous version changed each limb's *length* frame to frame, which
+      // read as legs growing/shrinking rather than actually stepping.
+      const stride = legPhase === 0 ? 0 : legPhase === 1 ? 3 : -3;
       shadow(20, 52, 13, 4);
       g.fillStyle(0xf3f4f6, 1);
-      g.fillRoundedRect(13, 40 + legOffset, 6, 13 - legOffset, 2);        // left leg
-      g.fillRoundedRect(21, 40 - legOffset, 6, 13 + legOffset, 2);        // right leg
-      g.fillRoundedRect(4, 24 - legOffset, 6, 17 + legOffset, 3);         // left arm (opposite swing)
-      g.fillRoundedRect(30, 24 + legOffset, 6, 17 - legOffset, 3);        // right arm
+      g.fillRoundedRect(13 - stride, 40, 6, 13, 2);        // left leg
+      g.fillRoundedRect(21 + stride, 40, 6, 13, 2);        // right leg
+      g.fillRoundedRect(4, 24 + stride, 6, 17, 3);         // left arm (counter-swings vs. legs)
+      g.fillRoundedRect(30, 24 - stride, 6, 17, 3);        // right arm
       g.fillRoundedRect(9, 21, 22, 24, 8);   // torso
       g.fillCircle(20, 13, 10);              // head
       g.fillStyle(0x1f2937, 1);
