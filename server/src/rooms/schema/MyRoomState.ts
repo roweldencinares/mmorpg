@@ -23,6 +23,8 @@ export const Player = schema({
   vy: t.number(),
   hp: t.number(),
   maxHp: t.number(),
+  level: t.number(),
+  xp: t.number(),
   /** itemId -> quantity */
   inventory: t.map("number"),
   /** mobType -> discovered (true once killed at least once) */

@@ -36,6 +36,15 @@ const TARGETED_MOB_COLOR = 0xffff88;
 // Mirrors server's QUEST_KILL_TARGET (shared/constants.ts).
 const QUEST_KILL_TARGET = 10;
 
+// Mirrors server's XP_PER_LEVEL / xpToNextLevel (shared/constants.ts).
+const XP_PER_LEVEL = 50;
+function xpToNextLevel(level: number): number {
+  return level * XP_PER_LEVEL;
+}
+
+// Width of the XP bar drawn in the portrait panel, below the HP bar.
+const XP_BAR_WIDTH = 158;
+
 // Below this distance to the click target we consider ourselves "arrived"
 // and stop sending movement input.
 const ARRIVE_THRESHOLD = 4;
@@ -51,7 +60,7 @@ const MOB_PICK_RADIUS = 24;
 const ATTACK_SEND_INTERVAL_MS = 350;
 
 interface MobView { x: number; y: number; hp: number; maxHp: number; alive: boolean; type: string; }
-interface PlayerView { x: number; y: number; hp: number; maxHp: number; }
+interface PlayerView { x: number; y: number; hp: number; maxHp: number; level: number; xp: number; }
 
 class WorldScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -73,6 +82,8 @@ class WorldScene extends Phaser.Scene {
 
   private hpText!: Phaser.GameObjects.Text;
   private hpBarFill!: Phaser.GameObjects.Rectangle;
+  private levelText!: Phaser.GameObjects.Text;
+  private xpBarFill!: Phaser.GameObjects.Rectangle;
   private inventorySlots = new Map<string, { icon: Phaser.GameObjects.Rectangle; qtyText: Phaser.GameObjects.Text }>();
   private playerHpBars = new Map<string, { bg: Phaser.GameObjects.Rectangle; fill: Phaser.GameObjects.Rectangle }>();
   private players = new Map<string, PlayerView>();
@@ -115,6 +126,20 @@ class WorldScene extends Phaser.Scene {
       fontStyle: "bold",
     }).setOrigin(0.5).setDepth(3)
       .setStroke("#000000", 3);
+
+    // --- Level + XP bar, same portrait panel, below the HP bar ---
+    this.levelText = this.add.text(18, 58, "Lv 1", {
+      fontFamily: "monospace",
+      fontSize: "10px",
+      color: "#a5b4fc",
+      fontStyle: "bold",
+    }).setOrigin(0, 0.5).setDepth(2);
+
+    const xpBarX = 54;
+    const xpBarY = 54;
+    const xpBarBg = this.add.rectangle(xpBarX, xpBarY, XP_BAR_WIDTH, 8, 0x1f2937).setOrigin(0, 0).setDepth(2);
+    this.xpBarFill = this.add.rectangle(xpBarX, xpBarY, XP_BAR_WIDTH, 8, 0x60a5fa).setOrigin(0, 0).setDepth(2);
+    xpBarBg.setStrokeStyle(1, 0x000000);
 
     // --- Quest panel ---
     const questPanel = this.add.graphics().setDepth(1);
@@ -234,6 +259,12 @@ class WorldScene extends Phaser.Scene {
     this.hpBarFill.setFillStyle(ratio > 0.5 ? 0x4ade80 : ratio > 0.25 ? 0xfbbf24 : 0xf87171);
   }
 
+  private updateXpBar(level: number, xp: number) {
+    this.levelText.setText(`Lv ${level}`);
+    const ratio = Phaser.Math.Clamp(xp / xpToNextLevel(level), 0, 1);
+    this.xpBarFill.width = XP_BAR_WIDTH * ratio;
+  }
+
   private spawnFloatingText(x: number, y: number, text: string, color: string) {
     const label = this.add.text(x, y, text, {
       fontFamily: "monospace",
@@ -335,7 +366,7 @@ class WorldScene extends Phaser.Scene {
 
       $(room.state).players.onAdd((player, sessionId) => {
         const isMe = sessionId === room.sessionId;
-        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp });
+        this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp });
 
         const avatar = this.add.image(player.x, player.y, "hero")
           .setDisplaySize(40, 56)
@@ -357,7 +388,11 @@ class WorldScene extends Phaser.Scene {
         $(player).onChange(() => {
           const view = this.players.get(sessionId);
           const prevHp = view?.hp ?? player.hp;
-          if (view) { view.x = player.x; view.y = player.y; view.hp = player.hp; view.maxHp = player.maxHp; }
+          const prevLevel = view?.level ?? player.level;
+          if (view) {
+            view.x = player.x; view.y = player.y; view.hp = player.hp; view.maxHp = player.maxHp;
+            view.level = player.level; view.xp = player.xp;
+          }
 
           const dmg = prevHp - player.hp;
           if (dmg > 0) { this.spawnFloatingText(player.x, player.y - 30, `-${dmg}`, "#f87171"); }
@@ -372,6 +407,8 @@ class WorldScene extends Phaser.Scene {
           if (isMe) {
             this.hpText.setText(alive ? `${player.hp}/${player.maxHp}` : "respawning...");
             this.updateHpBar(player.hp, player.maxHp);
+            this.updateXpBar(player.level, player.xp);
+            if (player.level > prevLevel) { this.queueToast(`Level up! Lv ${player.level}`, "#a5b4fc"); }
             if (!alive) { this.clearAttackTarget(); this.clearClickTarget(); }
 
             const questLine = player.questComplete
@@ -384,6 +421,7 @@ class WorldScene extends Phaser.Scene {
         if (isMe) {
           this.hpText.setText(`${player.hp}/${player.maxHp}`);
           this.updateHpBar(player.hp, player.maxHp);
+          this.updateXpBar(player.level, player.xp);
           this.questText.setText(player.questComplete
             ? "Cull the Vermin — complete!"
             : `Cull the Vermin  ${player.questKills}/${QUEST_KILL_TARGET}`);

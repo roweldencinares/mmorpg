@@ -9,6 +9,7 @@ import {
   MOB_ATTACK_RANGE, MOB_ATTACK_DAMAGE, MOB_ATTACK_COOLDOWN_MS, MOB_RESPAWN_MS,
   PLAYER_MAX_HP, MOB_DAMAGE_TO_PLAYER, MOB_ATTACK_INTERVAL_MS, PLAYER_RESPAWN_MS,
   QUEST_KILL_TARGET, QUEST_REWARD_ITEM, QUEST_REWARD_QTY,
+  LEVEL_UP_MAX_HP_BONUS, xpToNextLevel,
 } from "../shared/constants.js";
 
 /** Fixed spawn points for the first pass — no wandering AI yet. */
@@ -96,6 +97,24 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
           player.inventory.set(QUEST_REWARD_ITEM, (player.inventory.get(QUEST_REWARD_ITEM) ?? 0) + QUEST_REWARD_QTY);
         }
       }
+
+      this.awardXp(player, mob.maxHp);
+    }
+  }
+
+  /**
+   * Grants XP for a kill and applies the leveling curve from shared/constants.ts.
+   * Looped rather than a single `if` so one big kill can carry a player across
+   * more than one level threshold in a single award.
+   */
+  private awardXp(player: Player, amount: number) {
+    player.xp += amount;
+
+    while (player.xp >= xpToNextLevel(player.level)) {
+      player.xp -= xpToNextLevel(player.level);
+      player.level += 1;
+      player.maxHp += LEVEL_UP_MAX_HP_BONUS;
+      player.hp = player.maxHp; // full heal on level-up
     }
   }
 
@@ -111,6 +130,8 @@ export class MyRoom extends Room<{ state: MyRoomState, input: MoveInput }> {
       vy: 0,
       hp: PLAYER_MAX_HP,
       maxHp: PLAYER_MAX_HP,
+      level: 1,
+      xp: 0,
       questKills: 0,
       questComplete: false,
     }));

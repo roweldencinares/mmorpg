@@ -36,3 +36,19 @@ export const PLAYER_RESPAWN_MS = 3000;
 export const QUEST_KILL_TARGET = 10;
 export const QUEST_REWARD_ITEM = "gold_coin";
 export const QUEST_REWARD_QTY = 10;
+
+/**
+ * Leveling curve: reaching level N+1 from level N costs `N * XP_PER_LEVEL` xp.
+ * `player.xp` tracks progress within the *current* level (it resets to the
+ * leftover remainder on level-up, it is not a lifetime total) so the client
+ * can render it directly as a 0..xpToNextLevel(level) progress bar.
+ */
+export const XP_PER_LEVEL = 50;
+
+/** Max HP granted, and fully healed to, on every level gained. */
+export const LEVEL_UP_MAX_HP_BONUS = 10;
+
+/** XP required to advance from `level` to `level + 1`. */
+export function xpToNextLevel(level: number): number {
+  return level * XP_PER_LEVEL;
+}
