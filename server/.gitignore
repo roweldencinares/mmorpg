@@ -1,0 +1,10 @@
+node_modules
+build
+.colyseus-cloud.json
+.devmode.json
+colyseus.db
+colyseus.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
