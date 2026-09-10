@@ -122,6 +122,8 @@ class WorldScene extends Phaser.Scene {
   private room?: any;
   private mobs = new Map<string, MobView>();
   private mobSprites = new Map<string, Phaser.GameObjects.Sprite>();
+  /** Mobs have no vx/vy in state (unlike Player) — track last position per mob to detect movement for walk anims. */
+  private mobLastPos = new Map<string, { x: number; y: number }>();
   private mobHpBars = new Map<string, { bg: Phaser.GameObjects.Rectangle; fill: Phaser.GameObjects.Rectangle }>();
   private attackTargetId?: string;
   private lastAttackSentAt = 0;
@@ -212,69 +214,86 @@ class WorldScene extends Phaser.Scene {
 
     // Player: a small articulated figure (legs/torso/arms/head/face), drawn
     // near-white so setTint() can still recolor it per-player (isMe/other,
-    // set where the sprite is created) without redrawing the shape.
-    bake("player", 40, 56, () => {
+    // set where the sprite is created) without redrawing the shape. The two
+    // "walk" frames swap which leg/arm pair is forward, for a scissor stride
+    // played back-and-forth in update() while the entity is actually moving.
+    const playerBody = (legPhase: 0 | 1 | 2) => {
+      const legOffset = legPhase === 0 ? 0 : legPhase === 1 ? 2 : -2;
       shadow(20, 52, 13, 4);
       g.fillStyle(0xf3f4f6, 1);
-      g.fillRoundedRect(13, 40, 6, 13, 2);   // left leg
-      g.fillRoundedRect(21, 40, 6, 13, 2);   // right leg
-      g.fillRoundedRect(4, 24, 6, 17, 3);    // left arm
-      g.fillRoundedRect(30, 24, 6, 17, 3);   // right arm
+      g.fillRoundedRect(13, 40 + legOffset, 6, 13 - legOffset, 2);        // left leg
+      g.fillRoundedRect(21, 40 - legOffset, 6, 13 + legOffset, 2);        // right leg
+      g.fillRoundedRect(4, 24 - legOffset, 6, 17 + legOffset, 3);         // left arm (opposite swing)
+      g.fillRoundedRect(30, 24 + legOffset, 6, 17 - legOffset, 3);        // right arm
       g.fillRoundedRect(9, 21, 22, 24, 8);   // torso
       g.fillCircle(20, 13, 10);              // head
       g.fillStyle(0x1f2937, 1);
       g.fillCircle(16, 12, 1.6);             // eyes
       g.fillCircle(24, 12, 1.6);
-    });
+    };
+    bake("player", 40, 56, () => playerBody(0));
+    bake("player-walk-a", 40, 56, () => playerBody(1));
+    bake("player-walk-b", 40, 56, () => playerBody(2));
 
     // Rat: a low, ground-hugging rodent — round body, forward snout, ears,
     // and a curved tail — read top-down rather than the humanoid stand-in.
-    bake("mob-rat", 36, 50, () => {
+    // Walk frames give it a small scurrying bounce (body raised + squashed).
+    const ratBody = (bob: number) => {
       shadow(18, 45, 13, 4);
       g.fillStyle(0x9ca3af, 1);
       g.lineStyle(3, 0x9ca3af, 1);
       g.beginPath();
-      g.moveTo(25, 34);
-      g.lineTo(31, 39);
-      g.lineTo(29, 45);
+      g.moveTo(25, 34 - bob);
+      g.lineTo(31, 39 - bob);
+      g.lineTo(29, 45 - bob);
       g.strokePath();                        // tail
-      g.fillCircle(11, 17, 4);               // left ear
-      g.fillCircle(23, 17, 4);               // right ear
-      g.fillEllipse(17, 30, 22, 20);         // body
-      g.fillTriangle(10, 21, 17, 12, 22, 21); // snout
+      g.fillCircle(11, 17 - bob, 4);          // left ear
+      g.fillCircle(23, 17 - bob, 4);          // right ear
+      g.fillEllipse(17, 30 - bob, 22, 20 - bob); // body
+      g.fillTriangle(10, 21 - bob, 17, 12 - bob, 22, 21 - bob); // snout
       g.fillStyle(0xf9a8d4, 1);
-      g.fillCircle(11, 17, 2);               // inner ear
-      g.fillCircle(23, 17, 2);
+      g.fillCircle(11, 17 - bob, 2);          // inner ear
+      g.fillCircle(23, 17 - bob, 2);
       g.fillStyle(0x1f2937, 1);
-      g.fillCircle(13, 26, 1.6);             // eyes
-      g.fillCircle(21, 26, 1.6);
-      g.fillCircle(17, 16, 1.4);             // nose
-    });
+      g.fillCircle(13, 26 - bob, 1.6);        // eyes
+      g.fillCircle(21, 26 - bob, 1.6);
+      g.fillCircle(17, 16 - bob, 1.4);        // nose
+    };
+    bake("mob-rat", 36, 50, () => ratBody(0));
+    bake("mob-rat-walk-a", 36, 50, () => ratBody(0));
+    bake("mob-rat-walk-b", 36, 50, () => ratBody(2));
 
     // Slime: classic gel teardrop — rounded top tapering to a flatter base,
-    // with a glossy highlight and a simple face.
-    bake("mob-slime", 36, 50, () => {
+    // with a glossy highlight and a simple face. Walk frames squash/stretch
+    // the whole blob for a gooey hop while moving.
+    const slimeBody = (squash: number) => {
       shadow(18, 45, 13, 4);
       g.fillStyle(0x0ea5e9, 1);
-      g.fillRoundedRect(4, 14, 28, 32, { tl: 14, tr: 14, bl: 5, br: 5 });
+      g.fillRoundedRect(4 - squash, 14 + squash, 28 + squash * 2, 32 - squash, { tl: 14, tr: 14, bl: 5, br: 5 });
       g.fillStyle(0x38bdf8, 1);
-      g.fillRoundedRect(6, 18, 24, 24, { tl: 12, tr: 12, bl: 4, br: 4 });
+      g.fillRoundedRect(6 - squash, 18 + squash, 24 + squash * 2, 24 - squash, { tl: 12, tr: 12, bl: 4, br: 4 });
       g.fillStyle(0xffffff, 0.4);
-      g.fillEllipse(13, 22, 10, 7);          // gloss highlight
+      g.fillEllipse(13, 22 + squash, 10, 7);  // gloss highlight
       g.fillStyle(0x0c4a6e, 1);
       g.fillCircle(14, 32, 2);               // eyes
       g.fillCircle(22, 32, 2);
-    });
+    };
+    bake("mob-slime", 36, 50, () => slimeBody(0));
+    bake("mob-slime-walk-a", 36, 50, () => slimeBody(-2));
+    bake("mob-slime-walk-b", 36, 50, () => slimeBody(2));
 
     // Wolf: a top-down quadruped — legs peeking from under an elongated
-    // body, pointed ears, snout, and a tail — clearly not humanoid.
-    bake("mob-wolf", 36, 50, () => {
+    // body, pointed ears, snout, and a tail — clearly not humanoid. Walk
+    // frames swap a diagonal leg pair forward/back for a trotting gait.
+    const wolfBody = (gait: 0 | 1 | 2) => {
+      const front = gait === 1 ? -2 : gait === 2 ? 2 : 0;
+      const back = -front;
       shadow(18, 46, 14, 4);
       g.fillStyle(0x4a2408, 1);
-      g.fillEllipse(9, 27, 6, 10);            // legs (drawn under body)
-      g.fillEllipse(27, 27, 6, 10);
-      g.fillEllipse(9, 40, 6, 10);
-      g.fillEllipse(27, 40, 6, 10);
+      g.fillEllipse(9, 27 + front, 6, 10);    // front-left leg
+      g.fillEllipse(27, 27 + back, 6, 10);    // front-right leg
+      g.fillEllipse(9, 40 + back, 6, 10);     // back-left leg
+      g.fillEllipse(27, 40 + front, 6, 10);   // back-right leg
       g.lineStyle(4, 0x78350f, 1);
       g.beginPath();
       g.moveTo(18, 42);
@@ -290,7 +309,10 @@ class WorldScene extends Phaser.Scene {
       g.fillCircle(15, 22, 1.6);              // eyes
       g.fillCircle(21, 22, 1.6);
       g.fillCircle(18, 10, 1.4);              // nose
-    });
+    };
+    bake("mob-wolf", 36, 50, () => wolfBody(0));
+    bake("mob-wolf-walk-a", 36, 50, () => wolfBody(1));
+    bake("mob-wolf-walk-b", 36, 50, () => wolfBody(2));
 
     bake("icon-coin", 22, 22, () => {
       g.fillStyle(0xfbbf24, 1);
@@ -339,9 +361,37 @@ class WorldScene extends Phaser.Scene {
     g.destroy();
   }
 
+  /** Two-frame walk cycles for each procedurally-drawn type, played/stopped in update() based on actual movement. */
+  private buildWalkAnimations() {
+    const cycle = (key: string, base: string) => {
+      this.anims.create({
+        key,
+        frames: [{ key: `${base}-walk-a` }, { key: `${base}-walk-b` }],
+        frameRate: 7,
+        repeat: -1,
+      });
+    };
+    cycle("walk-player", "player");
+    cycle("walk-mob-rat", "mob-rat");
+    cycle("walk-mob-slime", "mob-slime");
+    cycle("walk-mob-wolf", "mob-wolf");
+  }
+
+  /** Plays the walk cycle for `texture` while moving, or shows its still frame when not. */
+  private setWalking(sprite: Phaser.GameObjects.Sprite, texture: string, moving: boolean) {
+    if (moving) {
+      const key = `walk-${texture}`;
+      if (sprite.anims.getName() !== key) { sprite.play(key); }
+    } else if (sprite.anims.isPlaying) {
+      sprite.anims.stop();
+      sprite.setTexture(texture);
+    }
+  }
+
   create() {
     this.cameras.main.setBackgroundColor("#101018");
     this.buildProceduralTextures();
+    this.buildWalkAnimations();
 
     this.backgroundGraphics = this.add.graphics().setDepth(0);
     this.drawBackground();
@@ -854,6 +904,7 @@ class WorldScene extends Phaser.Scene {
           .setDisplaySize(36, 50)
           .setInteractive({ useHandCursor: true });
         this.mobSprites.set(mobId, sprite);
+        this.mobLastPos.set(mobId, { x: mob.x, y: mob.y });
 
         const nameLabel = this.add.text(mob.x, mob.y - 46, MOB_TYPE_INFO[mob.type]?.name ?? mob.type, {
           fontFamily: "monospace",
@@ -888,6 +939,11 @@ class WorldScene extends Phaser.Scene {
           if (dmg > 0) { this.spawnFloatingText(mob.x, mob.y - 20, `-${dmg}`, "#ffffff"); }
 
           const tint = this.attackTargetId === mobId ? TARGETED_MOB_COLOR : 0xffffff;
+          const lastPos = this.mobLastPos.get(mobId) ?? { x: mob.x, y: mob.y };
+          const moved = Math.hypot(mob.x - lastPos.x, mob.y - lastPos.y);
+          this.setWalking(sprite, info?.texture ?? "mob-rat", mob.alive && moved > 0.3);
+          if (mob.x - lastPos.x > 0.3) { sprite.setFlipX(false); } else if (mob.x - lastPos.x < -0.3) { sprite.setFlipX(true); }
+          this.mobLastPos.set(mobId, { x: mob.x, y: mob.y });
           sprite.setPosition(mob.x, mob.y).setTint(tint);
           nameLabel.setPosition(mob.x, mob.y - 46);
           hpBg.setPosition(mob.x, mob.y - 34);
@@ -953,6 +1009,8 @@ class WorldScene extends Phaser.Scene {
 
           const alive = player.hp > 0;
           avatar.setPosition(player.x, player.y).setAlpha(alive ? 1 : 0.3);
+          this.setWalking(avatar, "player", alive && Math.hypot(player.vx, player.vy) > 1);
+          if (player.vx > 1) { avatar.setFlipX(false); } else if (player.vx < -1) { avatar.setFlipX(true); }
           label.setPosition(player.x, player.y - 38);
           hpBg.setPosition(player.x, player.y - 46);
           hpFill.setPosition(player.x - barWidth / 2, player.y - 46);
