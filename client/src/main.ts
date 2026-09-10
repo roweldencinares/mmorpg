@@ -1,6 +1,16 @@
 import Phaser from "phaser";
 import { Client, getStateCallbacks, type InputHandle } from "@colyseus/sdk";
-import heroUrl from "./assets/hero.png";
+
+// Pixel-art sprites/icons sourced from the Reldens project (MIT) — see
+// assets/reldens/NOTICE.md. Replace the old scaled-down anime portrait
+// (assets/hero.png, no longer used) with art actually made for top-down play.
+import playerBaseUrl from "./assets/reldens/player-base.png";
+import monsterGolemUrl from "./assets/reldens/monster-golem2.png";
+import monsterTreantUrl from "./assets/reldens/monster-treant.png";
+import iconCoinUrl from "./assets/reldens/coins.png";
+import iconPotionUrl from "./assets/reldens/heal-potion-20.png";
+import iconAxeUrl from "./assets/reldens/axe.png";
+import iconShieldUrl from "./assets/reldens/wooden-shield.png";
 
 const ARENA_WIDTH = 800;
 const ARENA_HEIGHT = 600;
@@ -30,6 +40,16 @@ const ITEM_COLORS: Record<string, number> = {
   leather_armor: 0xa16207,
 };
 
+// Real pixel-art icons (from Reldens, see assets/reldens/NOTICE.md) for items
+// where a close-enough match exists; everything else falls back to a plain
+// ITEM_COLORS swatch rather than force a mismatched icon onto it.
+const ITEM_ICON: Partial<Record<string, { texture: string; frame: number }>> = {
+  gold_coin: { texture: "icon-coin", frame: 0 },
+  health_potion: { texture: "icon-potion", frame: 0 },
+  iron_dagger: { texture: "icon-axe", frame: 0 },
+  leather_armor: { texture: "icon-shield", frame: 0 },
+};
+
 // Mirrors server's shared/economy.ts — display data only, the server is the
 // source of truth for prices/recipes and validates every buy/craft/use.
 const SHOP_CURRENCY_ITEM = "gold_coin";
@@ -54,11 +74,14 @@ const GEAR_CATALOG: Record<string, { slot: "weapon" | "armor"; name: string; pow
 // player's current position, before giving up and going idle.
 const AUTO_ATTACK_LEASH_RADIUS = 200;
 
-// Mirrors server's shared/mobTypes.ts — display names/colors only.
-const MOB_TYPE_INFO: Record<string, { name: string; color: number }> = {
-  rat: { name: "Rat", color: 0x9ca3af },
-  slime: { name: "Slime", color: 0x38bdf8 },
-  wolf: { name: "Wolf", color: 0x78350f },
+// Mirrors server's shared/mobTypes.ts — display names/art only. Only two
+// distinct monster sprites are available (golem, treant) so slime/wolf borrow
+// them as reskins rather than an exact match; rat reuses the player charset,
+// tinted, since there's no rodent sprite in the set we copied from Reldens.
+const MOB_TYPE_INFO: Record<string, { name: string; texture: string; frame: number; tint: number }> = {
+  rat: { name: "Rat", texture: "player", frame: 1, tint: 0x9ca3af },
+  slime: { name: "Slime", texture: "monster-treant", frame: 1, tint: 0xffffff },
+  wolf: { name: "Wolf", texture: "monster-golem", frame: 1, tint: 0xffffff },
 };
 const DEFAULT_MOB_COLOR = 0xff4444;
 const TARGETED_MOB_COLOR = 0xffff88;
@@ -99,7 +122,7 @@ interface PlayerView { x: number; y: number; hp: number; maxHp: number; level: n
 class WorldScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd!: { W: Phaser.Input.Keyboard.Key; A: Phaser.Input.Keyboard.Key; S: Phaser.Input.Keyboard.Key; D: Phaser.Input.Keyboard.Key };
-  private sprites = new Map<string, Phaser.GameObjects.Image>();
+  private sprites = new Map<string, Phaser.GameObjects.Sprite>();
   private labels = new Map<string, Phaser.GameObjects.Text>();
   private statusText!: Phaser.GameObjects.Text;
   private myInput?: InputHandle<MoveInput>;
@@ -109,7 +132,7 @@ class WorldScene extends Phaser.Scene {
 
   private room?: any;
   private mobs = new Map<string, MobView>();
-  private mobSprites = new Map<string, Phaser.GameObjects.Image>();
+  private mobSprites = new Map<string, Phaser.GameObjects.Sprite>();
   private mobHpBars = new Map<string, { bg: Phaser.GameObjects.Rectangle; fill: Phaser.GameObjects.Rectangle }>();
   private attackTargetId?: string;
   private lastAttackSentAt = 0;
@@ -121,7 +144,7 @@ class WorldScene extends Phaser.Scene {
   private xpBarFill!: Phaser.GameObjects.Rectangle;
   private powerText!: Phaser.GameObjects.Text;
   private inventorySlots = new Map<string, {
-    icon: Phaser.GameObjects.Rectangle;
+    icon: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Sprite;
     nameText: Phaser.GameObjects.Text;
     qtyText: Phaser.GameObjects.Text;
     useButton?: Phaser.GameObjects.Rectangle;
@@ -181,7 +204,17 @@ class WorldScene extends Phaser.Scene {
   private deathOverlaySubtitle!: Phaser.GameObjects.Text;
 
   preload() {
-    this.load.image("hero", heroUrl);
+    // RPG-Maker-style charsets: 3 walk-cycle frames x 4 facings (down/left/right/up).
+    // We don't animate yet — frame 1 of each row is the "standing still" pose.
+    this.load.spritesheet("player", playerBaseUrl, { frameWidth: 52, frameHeight: 71 });
+    this.load.spritesheet("monster-golem", monsterGolemUrl, { frameWidth: 47, frameHeight: 50 });
+    this.load.spritesheet("monster-treant", monsterTreantUrl, { frameWidth: 47, frameHeight: 50 });
+
+    // Item icons: 3-frame idle-bob strips, we only need a single static frame.
+    this.load.spritesheet("icon-coin", iconCoinUrl, { frameWidth: 32, frameHeight: 32 });
+    this.load.spritesheet("icon-potion", iconPotionUrl, { frameWidth: 32, frameHeight: 32 });
+    this.load.spritesheet("icon-axe", iconAxeUrl, { frameWidth: 32, frameHeight: 32 });
+    this.load.spritesheet("icon-shield", iconShieldUrl, { frameWidth: 32, frameHeight: 32 });
   }
 
   create() {
@@ -301,8 +334,12 @@ class WorldScene extends Phaser.Scene {
 
     ITEM_ORDER.forEach((itemId, i) => {
       const rowY = this.bagPanelBounds.y + 5 + i * bagRowHeight;
-      const icon = this.add.rectangle(this.bagPanelBounds.x + 8, rowY, 22, 22, ITEM_COLORS[itemId])
-        .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false);
+      const iconInfo = ITEM_ICON[itemId];
+      const icon: Phaser.GameObjects.Rectangle | Phaser.GameObjects.Sprite = iconInfo
+        ? this.add.sprite(this.bagPanelBounds.x + 19, rowY + 11, iconInfo.texture, iconInfo.frame)
+          .setDisplaySize(22, 22).setDepth(2).setVisible(false)
+        : this.add.rectangle(this.bagPanelBounds.x + 8, rowY, 22, 22, ITEM_COLORS[itemId])
+          .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false);
       const nameText = this.add.text(this.bagPanelBounds.x + 38, rowY + 11, ITEM_NAMES[itemId] ?? itemId, {
         fontFamily: "monospace", fontSize: "11px", color: "#e5e7eb",
       }).setOrigin(0, 0.5).setDepth(2).setVisible(false);
@@ -363,8 +400,12 @@ class WorldScene extends Phaser.Scene {
 
     SHOP_CATALOG.forEach((entry, i) => {
       const rowY = this.shopPanelBounds.y + shopHeaderHeight + 5 + i * shopRowHeight;
-      const icon = this.add.rectangle(this.shopPanelBounds.x + 8, rowY, 22, 22, ITEM_COLORS[entry.itemId])
-        .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false);
+      const shopIconInfo = ITEM_ICON[entry.itemId];
+      const icon = shopIconInfo
+        ? this.add.sprite(this.shopPanelBounds.x + 19, rowY + 11, shopIconInfo.texture, shopIconInfo.frame)
+          .setDisplaySize(22, 22).setDepth(2).setVisible(false)
+        : this.add.rectangle(this.shopPanelBounds.x + 8, rowY, 22, 22, ITEM_COLORS[entry.itemId])
+          .setOrigin(0, 0).setStrokeStyle(1, 0x000000).setDepth(2).setVisible(false);
       const nameText = this.add.text(this.shopPanelBounds.x + 38, rowY + 11, `${ITEM_NAMES[entry.itemId] ?? entry.itemId} (${entry.price}g)`, {
         fontFamily: "monospace", fontSize: "10px", color: "#e5e7eb",
       }).setOrigin(0, 0.5).setDepth(2).setVisible(false);
@@ -536,7 +577,7 @@ class WorldScene extends Phaser.Scene {
   private clearAttackTarget() {
     if (this.attackTargetId) {
       const mob = this.mobs.get(this.attackTargetId);
-      const baseColor = mob ? (MOB_TYPE_INFO[mob.type]?.color ?? DEFAULT_MOB_COLOR) : DEFAULT_MOB_COLOR;
+      const baseColor = mob ? (MOB_TYPE_INFO[mob.type]?.tint ?? DEFAULT_MOB_COLOR) : DEFAULT_MOB_COLOR;
       this.mobSprites.get(this.attackTargetId)?.setTint(baseColor);
     }
     this.attackTargetId = undefined;
@@ -686,11 +727,11 @@ class WorldScene extends Phaser.Scene {
 
       $(room.state).mobs.onAdd((mob, mobId) => {
         this.mobs.set(mobId, { x: mob.x, y: mob.y, hp: mob.hp, maxHp: mob.maxHp, alive: mob.alive, type: mob.type, zone: mob.zone });
-        const baseColor = MOB_TYPE_INFO[mob.type]?.color ?? DEFAULT_MOB_COLOR;
+        const info = MOB_TYPE_INFO[mob.type];
 
-        const sprite = this.add.image(mob.x, mob.y, "hero")
+        const sprite = this.add.sprite(mob.x, mob.y, info?.texture ?? "player", info?.frame ?? 1)
           .setDisplaySize(36, 50)
-          .setTint(baseColor)
+          .setTint(info?.tint ?? DEFAULT_MOB_COLOR)
           .setInteractive({ useHandCursor: true });
         this.mobSprites.set(mobId, sprite);
 
@@ -726,7 +767,7 @@ class WorldScene extends Phaser.Scene {
           const dmg = prevHp - mob.hp;
           if (dmg > 0) { this.spawnFloatingText(mob.x, mob.y - 20, `-${dmg}`, "#ffffff"); }
 
-          const tint = this.attackTargetId === mobId ? TARGETED_MOB_COLOR : baseColor;
+          const tint = this.attackTargetId === mobId ? TARGETED_MOB_COLOR : (info?.tint ?? DEFAULT_MOB_COLOR);
           sprite.setPosition(mob.x, mob.y).setTint(tint);
           nameLabel.setPosition(mob.x, mob.y - 46);
           hpBg.setPosition(mob.x, mob.y - 34);
@@ -742,7 +783,7 @@ class WorldScene extends Phaser.Scene {
         const isMe = sessionId === room.sessionId;
         this.players.set(sessionId, { x: player.x, y: player.y, hp: player.hp, maxHp: player.maxHp, level: player.level, xp: player.xp, zone: player.zone, equippedWeapon: player.equippedWeapon, equippedArmor: player.equippedArmor });
 
-        const avatar = this.add.image(player.x, player.y, "hero")
+        const avatar = this.add.sprite(player.x, player.y, "player", 1)
           .setDisplaySize(40, 56)
           .setTint(isMe ? 0xffffff : 0xffb380);
         this.sprites.set(sessionId, avatar);
